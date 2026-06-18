@@ -2,7 +2,7 @@
 
 Pipeline for learning an adapter between AdaFace and ArcFace spaces, then running the inversion-attack evaluation.
 
-The repository is organized so the real logic lives in Python modules under `src/emb2face/`, while the notebooks stay thin and only call the CLI.
+The repository is organized so the real logic lives in Python modules under `src/emb2face/`, while the notebooks stay thin and bootstrap the environment before calling the CLI.
 
 ## What you get
 
@@ -18,8 +18,8 @@ The repository is organized so the real logic lives in Python modules under `src
 - `src/emb2face/train.py`: adapter training pipeline
 - `src/emb2face/attack.py`: inversion attack pipeline
 - `config/default.yaml`: default config you can copy and edit
-- `notebooks/01_adapter_training (2).ipynb`: thin notebook wrapper for training
-- `notebooks/02_inversion_attack_eval (2).ipynb`: thin notebook wrapper for attack evaluation
+- `notebooks/01_adapter_training.ipynb`: thin notebook wrapper for training
+- `notebooks/02_inversion_attack_eval.ipynb`: thin notebook wrapper for attack evaluation
 
 ## Requirements
 
@@ -39,7 +39,7 @@ pip install -e .
 1. Clone the repo and enter it.
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/charan-v2/emb2face
 cd emb2face
 ```
 
@@ -76,39 +76,18 @@ There are two easy ways to use Colab:
 
 ### Option 1: Run the thin notebooks
 
-1. Open the notebook from the repo in Colab.
-2. Mount Drive if you want to keep datasets and outputs there.
-3. Install the repo into the runtime before the notebook cell that calls `main(...)`.
-
-Typical Colab bootstrap:
-
-```python
-from google.colab import drive
-drive.mount('/content/drive')
-
-!git clone <your-repo-url> /content/emb2face
-%cd /content/emb2face
-!pip install -r requirements.txt
-!pip install -e .
-```
-
-Then run:
-
-```python
-from emb2face.cli import main
-main(['train', '--config', 'config/default.yaml'])
-```
-
-or for the attack notebook:
-
-```python
-from emb2face.cli import main
-main(['attack', '--config', 'config/default.yaml'])
-```
+1. Open the notebook from the repo in Colab or locally.
+2. Run the first cell.
+3. The notebook will:
+   - locate the repo if it is already checked out locally
+   - clone the repo into `/content/emb2face` on Colab if needed
+   - install dependencies
+   - mount Drive on Colab
+   - launch the selected pipeline
 
 ### Option 2: Run the CLI directly in Colab
 
-After the same bootstrap above, you can use:
+If you prefer shell commands after the notebook bootstrap has run, you can still use:
 
 ```python
 !python -m emb2face train --config config/default.yaml
@@ -139,4 +118,3 @@ The pipeline writes artifacts under `output_root`, grouped by run mode:
 - The attack pipeline needs the adapter checkpoint produced by the training pipeline.
 - The evaluation workflow expects the same identity split logic used during training.
 - The face models used by the pipeline are downloaded on demand and cached locally.
-
