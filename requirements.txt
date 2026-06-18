@@ -1,0 +1,24 @@
+torch
+torchvision
+numpy
+pandas
+scikit-learn
+matplotlib
+opencv-python
+Pillow
+tqdm
+requests
+transformers
+huggingface_hub
+insightface
+diffusers
+accelerate
+peft
+lpips
+scikit-image
+gdown
+onnxruntime-gpu ; platform_system=="Linux"
+onnxruntime ; platform_system!="Linux"
+fvcore
+iopath
+pyyaml

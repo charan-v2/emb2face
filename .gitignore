@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Notebook artifacts
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+
+# Project outputs and caches
+outputs/
+.cache/
+*.pt
+*.pth
+*.ckpt
+*.npz
+*.npy
+*.pkl
+*.log
+
+# Optional local data and model downloads
+data/
+antelopev2.zip

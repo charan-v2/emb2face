@@ -1,0 +1,43 @@
+runmode: DEBUG
+dataset_root: "./data/webface_112x112"
+output_root: "./outputs/webface_arcada_adapter"
+device: "auto"
+adapter_type: "linear"
+seed: 42
+det_size: [640, 640]
+require_single_face: false
+min_images_per_identity: 2
+debug_max_identities: 25
+debug_max_images_per_identity: 8
+full_max_identities: null
+full_max_images_per_identity: null
+train_id_fraction: 0.70
+val_id_fraction: 0.15
+test_id_fraction: 0.15
+batch_size: 256
+num_epochs: 25
+learning_rate: 0.001
+weight_decay: 0.0001
+hidden_dim: 1024
+dropout: 0.10
+pairs_per_split: 3000
+experiments:
+  - exp1_arcface_baseline
+  - exp2_adaface_wrongspace
+  - exp3_adapter_mapped
+eval_source: casia_test
+eval_dataset_root: "./data/celeb_eval"
+eval_identities: 100
+eval_images_per_identity: 5
+debug_eval_identities: 5
+debug_eval_images_per_identity: 2
+num_recon_per_image: 1
+num_inference_steps: 25
+guidance_scale: 3.0
+impostors_per_probe: 20
+adapter_run_mode: full
+use_test_split_from_notebook1: true
+adaface_repo: "minchul/cvlface_adaface_ir50_ms1mv2"
+arc2face_repo: "FoivosPar/Arc2Face"
+insight_root: "~/.insightface"
+arc2face_local_dir: "./.cache/arc2face_models"
