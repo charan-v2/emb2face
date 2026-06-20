@@ -32,10 +32,10 @@ def main():
 
     emb_eval = eval_embedding_alignment(val_df, test_df, ada, arc, adapter, report_dir, cfg)
     verif_eval = eval_all_verification(val_df, test_df, arc, ada, adapter, report_dir, cfg)
-    print("Embedding eval:
-", emb_eval)
-    print("Verification eval:
-", verif_eval)
+    print("Embedding eval:")
+    print(emb_eval)
+    print("Verification eval:")
+    print(verif_eval)
 
 
 if __name__ == "__main__":

@@ -126,9 +126,9 @@ def build_eval_set(cfg: dict):
 
             meta = pd.read_csv(meta_csv)
             ids = sorted(meta["identity"].unique())
-            _, tmp = train_test_split(ids, test_size=1 - cfg["train_id_fraction"], random_state=cfg["seed_split"])
+            _, tmp = train_test_split(ids, test_size=1 - cfg["train_id_fraction"], random_state=cfg["seed"])
             vr = cfg["val_id_fraction"] / (cfg["val_id_fraction"] + cfg["test_id_fraction"])
-            _, test_ids = train_test_split(tmp, test_size=1 - vr, random_state=cfg["seed_split"])
+            _, test_ids = train_test_split(tmp, test_size=1 - vr, random_state=cfg["seed"])
             test_ids = sorted(test_ids)
         else:
             raise FileNotFoundError("Run the training pipeline first so paired metadata exists.")
