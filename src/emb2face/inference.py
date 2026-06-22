@@ -116,11 +116,12 @@ def sample_image_rows(
     exts: Iterable[str],
     num_identities: int | None,
     images_per_identity: int,
-    seed: int,
 ) -> list[dict]:
     identity_images = collect_identity_images(input_dir, exts)
     identities = sorted(identity_images.keys())
-    rng = np.random.default_rng(seed)
+    # Sampling is intentionally non-deterministic so the selected identities/images
+    # do not depend on the inference seed.
+    rng = np.random.default_rng()
 
     if num_identities is None or num_identities >= len(identities):
         selected_identities = list(rng.permutation(identities))
@@ -618,7 +619,6 @@ def run_inference_pipeline(
         cfg["image_extensions"],
         selected_num_identities,
         selected_images_per_identity,
-        base_seed,
     )
     if not rows:
         raise ValueError(f"No images found under {input_dir}")
