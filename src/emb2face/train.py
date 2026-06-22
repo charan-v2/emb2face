@@ -21,10 +21,13 @@ def cosine_loss(pred, target):
     return 1 - (pred * target).sum(dim=1).mean()
 
 
-def total_loss(pred, target):
+def total_loss(pred, target, mse_weight: float, cosine_weight: float):
+    pred = F.normalize(pred, dim=1)
+    target = F.normalize(target, dim=1)
     mse = F.mse_loss(pred, target)
-    cos = cosine_loss(pred, target)
-    return mse + cos, mse.detach(), cos.detach()
+    cos = 1 - (pred * target).sum(dim=1).mean()
+    loss = mse_weight * mse + cosine_weight * cos
+    return loss, mse.detach(), cos.detach()
 
 
 def split_identities(paired_df: pd.DataFrame, cfg: dict):
@@ -105,7 +108,7 @@ def train_adapter(arc_embs: np.ndarray, ada_embs: np.ndarray, paired_df: pd.Data
     start_epoch = 1
 
     if resume_path.exists():
-        ckpt = torch.load(resume_path, map_location=device)
+        ckpt = torch.load(resume_path, map_location=device, weights_only=False)
         adapter.load_state_dict(ckpt["state_dict"])
         optimizer.load_state_dict(ckpt["optimizer"])
         history = ckpt["history"]
@@ -114,33 +117,51 @@ def train_adapter(arc_embs: np.ndarray, ada_embs: np.ndarray, paired_df: pd.Data
 
     for epoch in range(start_epoch, cfg["num_epochs"] + 1):
         adapter.train()
-        train_loss_sum, train_n = 0.0, 0
+        train_loss_sum, train_mse_sum, train_cos_sum, train_n = 0.0, 0.0, 0.0, 0
         for x, y in tqdm(train_loader, desc=f"Epoch {epoch} train", leave=False):
             x, y = x.to(device), y.to(device)
             optimizer.zero_grad(set_to_none=True)
             pred = adapter(x)
-            loss, _, _ = total_loss(pred, y)
+            loss, mse_loss, cos_loss = total_loss(
+                pred,
+                y,
+                cfg["mse_loss_weight"],
+                cfg["cosine_loss_weight"],
+            )
             loss.backward()
             optimizer.step()
             bsz = x.size(0)
             train_loss_sum += loss.item() * bsz
+            train_mse_sum += mse_loss.item() * bsz
+            train_cos_sum += cos_loss.item() * bsz
             train_n += bsz
 
         adapter.eval()
-        val_loss_sum, val_n = 0.0, 0
+        val_loss_sum, val_mse_sum, val_cos_sum, val_n = 0.0, 0.0, 0.0, 0
         with torch.no_grad():
             for x, y in tqdm(val_loader, desc=f"Epoch {epoch} val", leave=False):
                 x, y = x.to(device), y.to(device)
                 pred = adapter(x)
-                loss, _, _ = total_loss(pred, y)
+                loss, mse_loss, cos_loss = total_loss(
+                    pred,
+                    y,
+                    cfg["mse_loss_weight"],
+                    cfg["cosine_loss_weight"],
+                )
                 bsz = x.size(0)
                 val_loss_sum += loss.item() * bsz
+                val_mse_sum += mse_loss.item() * bsz
+                val_cos_sum += cos_loss.item() * bsz
                 val_n += bsz
 
         row = {
             "epoch": epoch,
             "train_loss": train_loss_sum / max(train_n, 1),
             "val_loss": val_loss_sum / max(val_n, 1),
+            "train_mse": train_mse_sum / max(train_n, 1),
+            "train_cosine": train_cos_sum / max(train_n, 1),
+            "val_mse": val_mse_sum / max(val_n, 1),
+            "val_cosine": val_cos_sum / max(val_n, 1),
         }
         history.append(row)
         print(row)
@@ -182,7 +203,7 @@ def run_training_pipeline(cfg: dict):
     adapter, _, _, _ = train_adapter(arc_embs, ada_embs, paired_df, cfg)
 
     best_path = cfg["model_dir"] / f"best_{cfg['adapter_type']}_adapter.pt"
-    checkpoint = torch.load(best_path, map_location=setup_device(cfg))
+    checkpoint = torch.load(best_path, map_location=setup_device(cfg), weights_only=False)
     adapter.load_state_dict(checkpoint["state_dict"])
     adapter.eval()
 

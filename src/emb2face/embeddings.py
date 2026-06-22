@@ -101,6 +101,7 @@ def load_adaface_model(cfg: dict, device: torch.device):
         spec = importlib.util.spec_from_file_location("cvlface_wrapper", local_dir / "wrapper.py")
         module = importlib.util.module_from_spec(spec)
         assert spec and spec.loader
+        sys.modules[spec.name] = module
         spec.loader.exec_module(module)
         if not hasattr(module.CVLFaceRecognitionModel, "all_tied_weights_keys"):
             module.CVLFaceRecognitionModel.all_tied_weights_keys = {}

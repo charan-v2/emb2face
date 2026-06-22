@@ -27,7 +27,7 @@ def main():
 
     adapter = get_adapter(cfg, device)
     best_path = cfg["model_dir"] / f"best_{cfg['adapter_type']}_adapter.pt"
-    ckpt = torch.load(best_path, map_location=device)
+    ckpt = torch.load(best_path, map_location=device, weights_only=False)
     adapter.load_state_dict(ckpt["state_dict"])
 
     emb_eval = eval_embedding_alignment(val_df, test_df, ada, arc, adapter, report_dir, cfg)

@@ -27,6 +27,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "num_epochs": 25,
     "learning_rate": 1e-3,
     "weight_decay": 1e-4,
+    "mse_loss_weight": 1.0,
+    "cosine_loss_weight": 1.0,
     "hidden_dim": 1024,
     "dropout": 0.10,
     "adapter_type": "linear",  # "linear" or "mlp"

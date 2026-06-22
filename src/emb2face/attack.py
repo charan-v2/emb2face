@@ -72,7 +72,7 @@ def load_best_adapter(cfg: dict, device: torch.device):
     candidates = sorted(model_dir.glob("best_*_adapter.pt"))
     if not candidates:
         raise FileNotFoundError(f"No adapter checkpoint found in {model_dir}")
-    ckpt = torch.load(candidates[0], map_location=device)
+    ckpt = torch.load(candidates[0], map_location=device, weights_only=False)
     acfg = ckpt.get("config", {})
     atype = acfg.get("adapter_type", "linear")
     adapter = (

@@ -8,6 +8,7 @@ The repository is organized so the real logic lives in Python modules under `src
 
 - `train`: extracts paired embeddings, trains the adapter, and writes the split metadata.
 - `attack`: loads the trained adapter and runs the inversion attack experiments.
+- `infer`: loads the trained adapter and runs Arc2Face reconstruction on a folder of images.
 - `all`: runs training first, then the attack pipeline.
 
 ## Project layout
@@ -64,7 +65,25 @@ python -m emb2face train --config config/default.yaml
 python -m emb2face attack --config config/default.yaml
 ```
 
-5. Or do both in one go.
+5. Run the Arc2Face inference pipeline on a folder of images.
+
+```bash
+python -m emb2face infer --config config/default.yaml --input-dir /path/to/images
+```
+
+To limit how many images are taken from each identity folder:
+
+```bash
+python -m emb2face infer --config config/default.yaml --input-dir /path/to/images --max-images-per-identity 5
+```
+
+6. Run the Arc2Face inference pipeline on a single image and save the comparison panel.
+
+```bash
+python -m emb2face infer --config config/default.yaml --input-image /path/to/image.jpg
+```
+
+7. Or do both in one go.
 
 ```bash
 python -m emb2face all --config config/default.yaml
