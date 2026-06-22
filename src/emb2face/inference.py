@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import subprocess
 import sys
 from types import MethodType
@@ -16,6 +17,9 @@ from PIL import Image
 from .embeddings import arcface_from_image, load_adaface_model, load_arcface_app, setup_device, source_embeddings
 from .models import LinearAdapter, MLPAdapter
 from .utils import cosine_similarity_np, l2_normalize
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def ensure_arc2face_repo(cfg: dict) -> Path:
@@ -87,29 +91,61 @@ def load_best_adapter(cfg: dict, device: torch.device):
     return adapter, candidates[0]
 
 
-def collect_image_rows(
-    input_path: Path,
+def collect_identity_images(input_dir: Path, exts: Iterable[str]) -> dict[str, list[Path]]:
+    if not input_dir.exists() or not input_dir.is_dir():
+        raise FileNotFoundError(f"Input directory not found: {input_dir}")
+
+    identity_dirs = sorted([p for p in input_dir.iterdir() if p.is_dir()])
+    if not identity_dirs:
+        raise ValueError(f"No identity folders found under {input_dir}")
+
+    mapping: dict[str, list[Path]] = {}
+    for identity_dir in identity_dirs:
+        paths = sorted([p for p in identity_dir.rglob("*") if p.is_file() and p.suffix.lower() in exts])
+        if paths:
+            mapping[identity_dir.name] = paths
+
+    if not mapping:
+        raise ValueError(f"No images found under {input_dir}")
+
+    return mapping
+
+
+def sample_image_rows(
+    input_dir: Path,
     exts: Iterable[str],
-    max_images_per_identity: int | None = None,
-):
-    if input_path.is_file():
-        return [{"identity": input_path.stem, "image_path": input_path}]
+    num_identities: int | None,
+    images_per_identity: int,
+    seed: int,
+) -> list[dict]:
+    identity_images = collect_identity_images(input_dir, exts)
+    identities = sorted(identity_images.keys())
+    rng = np.random.default_rng(seed)
+
+    if num_identities is None or num_identities >= len(identities):
+        selected_identities = list(rng.permutation(identities))
+    else:
+        selected_identities = list(rng.choice(identities, size=num_identities, replace=False))
 
     rows = []
-
-    root_images = sorted([p for p in input_path.iterdir() if p.is_file() and p.suffix.lower() in exts])
-    if root_images:
-        if max_images_per_identity is not None:
-            root_images = root_images[:max_images_per_identity]
-        for p in root_images:
-            rows.append({"identity": input_path.name, "image_path": p})
-
-    for identity_dir in sorted([p for p in input_path.iterdir() if p.is_dir()]):
-        paths = sorted([p for p in identity_dir.rglob("*") if p.is_file() and p.suffix.lower() in exts])
-        if max_images_per_identity is not None:
-            paths = paths[:max_images_per_identity]
-        for p in paths:
-            rows.append({"identity": identity_dir.name, "image_path": p})
+    for identity_order, identity in enumerate(selected_identities):
+        paths = identity_images[identity]
+        take = min(images_per_identity, len(paths))
+        if take <= 0:
+            continue
+        if take == len(paths):
+            selected_paths = list(paths)
+        else:
+            selected_paths = [paths[i] for i in rng.choice(len(paths), size=take, replace=False)]
+        for image_order, image_path in enumerate(selected_paths):
+            rows.append(
+                {
+                    "identity": identity,
+                    "identity_order": identity_order,
+                    "image_order": image_order,
+                    "image_path": image_path,
+                }
+            )
 
     return rows
 
@@ -142,58 +178,259 @@ def generate_from_embedding(
     ).images
 
 
-def _score_generated_image(source_arc_emb: np.ndarray, image_path: Path, arc_app) -> float | None:
-    recon_arc = arcface_from_image(image_path, arc_app)
+def _score_generated_image(source_arc_emb: np.ndarray, image_path: Path, arc_app) -> tuple[float | None, str]:
+    import cv2
+
+    if not image_path.exists():
+        return None, "generated_image_missing"
+
+    img_bgr = cv2.imread(str(image_path))
+    if img_bgr is None:
+        return None, "generated_image_unreadable"
+
+    recon_arc, _ = None, None
+    try:
+        recon_arc = arcface_from_image(image_path, arc_app)
+    except Exception as exc:
+        LOGGER.warning("ArcFace scoring failed for %s: %s", image_path, exc)
+        return None, f"arcface_scoring_error:{exc.__class__.__name__}"
+
     if recon_arc is None:
-        return None
-    return cosine_similarity_np(source_arc_emb, recon_arc)
+        return None, "face_not_detected_by_arcface"
+
+    return cosine_similarity_np(source_arc_emb, recon_arc), "ok"
 
 
-def _score_generated_images(source_arc_emb: np.ndarray, image_paths: list[Path], arc_app) -> list[float | None]:
+def _score_generated_images(source_arc_emb: np.ndarray, image_paths: list[Path], arc_app) -> list[tuple[float | None, str]]:
     return [_score_generated_image(source_arc_emb, p, arc_app) for p in image_paths]
+
+
+def _score_text(score: float | None, reason: str | None) -> str:
+    if score is not None:
+        return f"Similarity: {score:.4f}"
+    if reason:
+        return f"Similarity: N/A ({reason})"
+    return "Similarity: N/A"
+
+
+def _process_sample(
+    *,
+    cfg: dict,
+    sample: dict,
+    adapter,
+    adapter_path: Path,
+    arc_app,
+    ada_model,
+    pipeline,
+    project_face_embs,
+    device: torch.device,
+    recon_dir: Path,
+    figures_dir: Path | None,
+    num_images_per_prompt: int,
+    base_seed: int,
+    sample_index: int,
+    save_comparison_figures: bool,
+):
+    image_path = Path(sample["image_path"])
+    emb = source_embeddings(image_path, arc_app, ada_model, device)
+    if emb is None:
+        return {
+            "identity": sample.get("identity"),
+            "identity_order": sample.get("identity_order"),
+            "image_order": sample.get("image_order"),
+            "image_path": str(image_path),
+            "status": "failed",
+            "reason": "face_or_embedding_extraction_failed",
+        }
+
+    source_arc = emb["arcface"]
+    source_ada = emb["adaface"]
+    source_rgb = np.array(Image.open(image_path).convert("RGB"))
+
+    ada_input = torch.from_numpy(emb["adaface"]).float().unsqueeze(0).to(device)
+    arc_input = torch.from_numpy(source_arc).float().unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        adapter_pred = adapter(ada_input).cpu().numpy()[0].astype(np.float32)
+    adapter_pred = l2_normalize(adapter_pred).astype(np.float32)
+
+    arcface_pred = arc_input.cpu().numpy()[0].astype(np.float32)
+    arcface_pred = l2_normalize(arcface_pred).astype(np.float32)
+
+    adaface_pred = l2_normalize(source_ada.astype(np.float32)).astype(np.float32)
+
+    stem = image_path.stem
+    identity = sample.get("identity", image_path.parent.name)
+    sample_recon_dir = recon_dir / identity / stem
+    sample_recon_dir.mkdir(parents=True, exist_ok=True)
+
+    adapter_images = generate_from_embedding(
+        pipeline,
+        project_face_embs,
+        adapter_pred,
+        num_images_per_prompt,
+        base_seed + sample_index * 10,
+        device,
+        cfg,
+    )
+    adaface_images = generate_from_embedding(
+        pipeline,
+        project_face_embs,
+        adaface_pred,
+        num_images_per_prompt,
+        base_seed + sample_index * 10 + 1,
+        device,
+        cfg,
+    )
+    arcface_images = generate_from_embedding(
+        pipeline,
+        project_face_embs,
+        arcface_pred,
+        num_images_per_prompt,
+        base_seed + sample_index * 10 + 2,
+        device,
+        cfg,
+    )
+
+    def _save_group(images, label):
+        paths = []
+        for k, image in enumerate(images):
+            out_path = sample_recon_dir / f"{stem}_{label}_{k}.png"
+            image.save(out_path)
+            paths.append(out_path)
+        return paths
+
+    adaface_saved = _save_group(adaface_images, "adaface_native")
+    adapter_saved = _save_group(adapter_images, "adaface_adapter")
+    arc_saved = _save_group(arcface_images, "arcface_native")
+
+    adaface_score, adaface_reason = _score_generated_image(source_arc, adaface_saved[0], arc_app) if adaface_saved else (None, "no_generated_image")
+    adapter_score, adapter_reason = _score_generated_image(source_arc, adapter_saved[0], arc_app) if adapter_saved else (None, "no_generated_image")
+    arcface_score, arcface_reason = _score_generated_image(source_arc, arc_saved[0], arc_app) if arc_saved else (None, "no_generated_image")
+
+    for label, score, reason, path in [
+        ("adaface_native", adaface_score, adaface_reason, adaface_saved[0] if adaface_saved else None),
+        ("adapter", adapter_score, adapter_reason, adapter_saved[0] if adapter_saved else None),
+        ("arcface", arcface_score, arcface_reason, arc_saved[0] if arc_saved else None),
+    ]:
+        if score is None:
+            LOGGER.warning("Similarity unavailable for %s on %s: %s", label, path, reason)
+
+    comparison_path = None
+    if save_comparison_figures and figures_dir is not None:
+        figures_dir.mkdir(parents=True, exist_ok=True)
+        comparison_path = figures_dir / identity / f"{stem}_comparison.png"
+        comparison_path.parent.mkdir(parents=True, exist_ok=True)
+        _save_single_image_figure(
+            input_path=image_path,
+            source_rgb=source_rgb,
+            adaface_image=adaface_images[0],
+            adapter_image=adapter_images[0],
+            arcface_image=arcface_images[0],
+            adaface_score=adaface_score,
+            adapter_score=adapter_score,
+            arcface_score=arcface_score,
+            adaface_reason=adaface_reason,
+            adapter_reason=adapter_reason,
+            arcface_reason=arcface_reason,
+            output_path=comparison_path,
+        )
+
+    return {
+        "identity": identity,
+        "identity_order": sample.get("identity_order"),
+        "image_order": sample.get("image_order"),
+        "image_path": str(image_path),
+        "status": "ok",
+        "arcface_source_path": str(image_path),
+        "adaface_native_recon_path": str(adaface_saved[0]) if adaface_saved else None,
+        "adapter_recon_path": str(adapter_saved[0]) if adapter_saved else None,
+        "arcface_recon_path": str(arc_saved[0]) if arc_saved else None,
+        "adaface_native_similarity_reason": adaface_reason,
+        "adapter_similarity_reason": adapter_reason,
+        "arcface_similarity_reason": arcface_reason,
+        "adaface_native_similarity": adaface_score,
+        "adapter_similarity": adapter_score,
+        "arcface_similarity": arcface_score,
+        "comparison_path": str(comparison_path) if comparison_path else None,
+        "adapter_path": str(adapter_path),
+    }
+
+
+def build_summary(result_df: pd.DataFrame, requested_identities: int | None, images_per_identity: int, save_comparison_figures: bool):
+    ok = result_df[result_df["status"] == "ok"].copy()
+    summary = {
+        "num_rows": int(len(result_df)),
+        "num_ok": int(len(ok)),
+        "num_failed": int((result_df["status"] != "ok").sum()),
+        "requested_identities": requested_identities,
+        "images_per_identity": images_per_identity,
+        "save_comparison_figures": save_comparison_figures,
+        "mean_adaface_native_similarity": float(ok["adaface_native_similarity"].mean()) if len(ok) else float("nan"),
+        "mean_adapter_similarity": float(ok["adapter_similarity"].mean()) if len(ok) else float("nan"),
+        "mean_arcface_similarity": float(ok["arcface_similarity"].mean()) if len(ok) else float("nan"),
+    }
+    return pd.DataFrame([summary])
 
 
 def _save_single_image_figure(
     input_path: Path,
     source_rgb: np.ndarray,
+    adaface_image,
     adapter_image,
     arcface_image,
+    adaface_score: float | None,
     adapter_score: float | None,
     arcface_score: float | None,
     output_path: Path,
+    adaface_reason: str | None = None,
+    adapter_reason: str | None = None,
+    arcface_reason: str | None = None,
 ):
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
 
     axes[0].imshow(source_rgb)
     axes[0].set_title("Input")
     axes[0].axis("off")
 
-    axes[1].imshow(adapter_image)
+    axes[1].imshow(adaface_image)
     axes[1].set_title("AdaFace -> Arc2Face")
     axes[1].axis("off")
     axes[1].text(
         0.5,
         -0.08,
-        f"Similarity: {adapter_score:.4f}" if adapter_score is not None else "Similarity: N/A",
+        _score_text(adaface_score, adaface_reason),
         ha="center",
         transform=axes[1].transAxes,
         fontsize=11,
     )
 
-    axes[2].imshow(arcface_image)
-    axes[2].set_title("ArcFace -> Arc2Face")
+    axes[2].imshow(adapter_image)
+    axes[2].set_title("AdaFace -> ArcFace -> Arc2Face")
     axes[2].axis("off")
     axes[2].text(
         0.5,
         -0.08,
-        f"Similarity: {arcface_score:.4f}" if arcface_score is not None else "Similarity: N/A",
+        _score_text(adapter_score, adapter_reason),
         ha="center",
         transform=axes[2].transAxes,
+        fontsize=11,
+    )
+
+    axes[3].imshow(arcface_image)
+    axes[3].set_title("ArcFace -> Arc2Face")
+    axes[3].axis("off")
+    axes[3].text(
+        0.5,
+        -0.08,
+        _score_text(arcface_score, arcface_reason),
+        ha="center",
+        transform=axes[3].transAxes,
         fontsize=11,
     )
 
@@ -233,6 +470,7 @@ def run_single_image_inference(
         raise ValueError(f"Could not extract a face embedding from {input_image}")
 
     source_arc = emb["arcface"]
+    source_ada = emb["adaface"]
     source_rgb = np.array(Image.open(input_image).convert("RGB"))
 
     ada_input = torch.from_numpy(emb["adaface"]).float().unsqueeze(0).to(device)
@@ -245,10 +483,15 @@ def run_single_image_inference(
     arcface_pred = arc_input.cpu().numpy()[0].astype(np.float32)
     arcface_pred = l2_normalize(arcface_pred).astype(np.float32)
 
+    adaface_pred = source_ada.astype(np.float32)
+    adaface_pred = l2_normalize(adaface_pred).astype(np.float32)
+
     stem = input_image.stem
     adapter_dir = recon_dir / f"{stem}_adaface_adapter"
+    adaface_dir = recon_dir / f"{stem}_adaface_native"
     arc_dir = recon_dir / f"{stem}_arcface_native"
     adapter_dir.mkdir(parents=True, exist_ok=True)
+    adaface_dir.mkdir(parents=True, exist_ok=True)
     arc_dir.mkdir(parents=True, exist_ok=True)
 
     adapter_images = generate_from_embedding(
@@ -260,12 +503,21 @@ def run_single_image_inference(
         device,
         cfg,
     )
+    adaface_images = generate_from_embedding(
+        pipeline,
+        project_face_embs,
+        adaface_pred,
+        n_images,
+        base_seed + 1,
+        device,
+        cfg,
+    )
     arcface_images = generate_from_embedding(
         pipeline,
         project_face_embs,
         arcface_pred,
         n_images,
-        base_seed + 1,
+        base_seed + 2,
         device,
         cfg,
     )
@@ -276,23 +528,35 @@ def run_single_image_inference(
         image.save(out_path)
         adapter_saved.append(out_path)
 
+    adaface_saved = []
+    for k, image in enumerate(adaface_images):
+        out_path = adaface_dir / f"{stem}_adaface_native_{k}.png"
+        image.save(out_path)
+        adaface_saved.append(out_path)
+
     arc_saved = []
     for k, image in enumerate(arcface_images):
         out_path = arc_dir / f"{stem}_arcface_native_{k}.png"
         image.save(out_path)
         arc_saved.append(out_path)
 
-    adapter_score = _score_generated_image(source_arc, adapter_saved[0], arc_app) if adapter_saved else None
-    arcface_score = _score_generated_image(source_arc, arc_saved[0], arc_app) if arc_saved else None
+    adaface_score, adaface_reason = _score_generated_image(source_arc, adaface_saved[0], arc_app) if adaface_saved else (None, "no_generated_image")
+    adapter_score, adapter_reason = _score_generated_image(source_arc, adapter_saved[0], arc_app) if adapter_saved else (None, "no_generated_image")
+    arcface_score, arcface_reason = _score_generated_image(source_arc, arc_saved[0], arc_app) if arc_saved else (None, "no_generated_image")
 
     comparison_path = output_dir / f"{stem}_comparison.png"
     _save_single_image_figure(
         input_path=input_image,
         source_rgb=source_rgb,
+        adaface_image=adaface_images[0],
         adapter_image=adapter_images[0],
         arcface_image=arcface_images[0],
+        adaface_score=adaface_score,
         adapter_score=adapter_score,
         arcface_score=arcface_score,
+        adaface_reason=adaface_reason,
+        adapter_reason=adapter_reason,
+        arcface_reason=arcface_reason,
         output_path=comparison_path,
     )
 
@@ -303,8 +567,10 @@ def run_single_image_inference(
                 "status": "ok",
                 "adapter_path": str(adapter_path),
                 "comparison_path": str(comparison_path),
+                "adaface_native_recon_path": str(adaface_saved[0]) if adaface_saved else None,
                 "adapter_recon_path": str(adapter_saved[0]) if adapter_saved else None,
                 "arcface_recon_path": str(arc_saved[0]) if arc_saved else None,
+                "adaface_native_similarity": adaface_score,
                 "adapter_similarity": adapter_score,
                 "arcface_similarity": arcface_score,
             }
@@ -323,9 +589,11 @@ def run_inference_pipeline(
     cfg: dict,
     input_dir: Path,
     output_dir: Path | None = None,
+    num_identities: int | None = None,
+    images_per_identity: int | None = None,
     num_images_per_prompt: int | None = None,
+    save_comparison_figures: bool | None = None,
     seed: int | None = None,
-    max_images_per_identity: int | None = None,
 ):
     device = _load_device(cfg)
     adapter, adapter_path = load_best_adapter(cfg, device)
@@ -340,73 +608,54 @@ def run_inference_pipeline(
     recon_dir.mkdir(parents=True, exist_ok=True)
 
     n_images = num_images_per_prompt if num_images_per_prompt is not None else cfg["num_recon_per_image"]
+    selected_num_identities = num_identities if num_identities is not None else cfg["inference_num_identities"]
+    selected_images_per_identity = images_per_identity if images_per_identity is not None else cfg["inference_images_per_identity"]
+    selected_save_figures = save_comparison_figures if save_comparison_figures is not None else cfg["save_comparison_figures"]
     base_seed = seed if seed is not None else cfg["seed"]
 
-    rows = collect_image_rows(input_dir, cfg["image_extensions"], max_images_per_identity=max_images_per_identity)
+    rows = sample_image_rows(
+        input_dir,
+        cfg["image_extensions"],
+        selected_num_identities,
+        selected_images_per_identity,
+        base_seed,
+    )
     if not rows:
         raise ValueError(f"No images found under {input_dir}")
 
+    selected_df = pd.DataFrame(rows)
+    selected_df.to_csv(output_dir / "selected_samples.csv", index=False)
+
+    figures_dir = output_dir / "figures" if selected_save_figures else None
     result_rows = []
     for idx, row in enumerate(tqdm(rows, desc="Inference")):
-        image_path = Path(row["image_path"])
-        emb = source_embeddings(image_path, arc_app, ada_model, device)
-        if emb is None:
-            result_rows.append(
-                {
-                    "identity": row.get("identity"),
-                    "image_path": str(image_path),
-                    "status": "failed",
-                    "reason": "face_or_embedding_extraction_failed",
-                }
-            )
-            continue
-
-        source_arc = emb["arcface"]
-        ada = torch.from_numpy(emb["adaface"]).float().unsqueeze(0).to(device)
-        with torch.no_grad():
-            arc_pred = adapter(ada).cpu().numpy()[0].astype(np.float32)
-        arc_pred = l2_normalize(arc_pred).astype(np.float32)
-
-        stem = image_path.stem
-        out_subdir = recon_dir / stem
-        out_subdir.mkdir(parents=True, exist_ok=True)
-        images = generate_from_embedding(
-            pipeline,
-            project_face_embs,
-            arc_pred,
-            n_images,
-            base_seed + idx,
-            device,
-            cfg,
+        row_result = _process_sample(
+            cfg=cfg,
+            sample=row,
+            adapter=adapter,
+            adapter_path=adapter_path,
+            arc_app=arc_app,
+            ada_model=ada_model,
+            pipeline=pipeline,
+            project_face_embs=project_face_embs,
+            device=device,
+            recon_dir=recon_dir,
+            figures_dir=figures_dir,
+            num_images_per_prompt=n_images,
+            base_seed=base_seed,
+            sample_index=idx,
+            save_comparison_figures=selected_save_figures,
         )
-
-        saved_paths = []
-        for k, image in enumerate(images):
-            out_path = out_subdir / f"{stem}_arc2face_{k}.png"
-            image.save(out_path)
-            saved_paths.append(str(out_path))
-
-        scores = _score_generated_images(source_arc, [Path(p) for p in saved_paths], arc_app)
-
-        result_rows.append(
-            {
-                "identity": row.get("identity"),
-                "image_path": str(image_path),
-                "status": "ok",
-                "arcface_source_path": str(image_path),
-                "output_paths": ";".join(saved_paths),
-                "output_scores": ";".join("" if s is None else f"{s:.6f}" for s in scores),
-                "first_output_score": scores[0] if scores else None,
-                "arcface_pred_norm": float(np.linalg.norm(arc_pred)),
-                "adapter_path": str(adapter_path),
-            }
-        )
+        result_rows.append(row_result)
 
     result_df = pd.DataFrame(result_rows)
-    result_df.to_csv(output_dir / "inference_index.csv", index=False)
+    result_df.to_csv(output_dir / "inference_report.csv", index=False)
+    summary_df = build_summary(result_df, selected_num_identities, selected_images_per_identity, selected_save_figures)
+    summary_df.to_csv(output_dir / "summary.csv", index=False)
     return {
         "output_dir": output_dir,
         "recon_dir": recon_dir,
         "adapter_path": adapter_path,
         "results": result_df,
+        "summary": summary_df,
     }

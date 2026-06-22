@@ -4,8 +4,8 @@ import pandas as pd
 
 base = Path("outputs")
 
-run_a = base / "00_100" / "webface_arcada_adapter"
-run_b = base / "101_150" / "webface_arcada_adapter"
+run_a = base / "00_150" / "webface_arcada_adapter"
+run_b = base / "151_499" / "webface_arcada_adapter"
 merged = base / "webface_arcada_adapter"
 
 out_emb = merged / "embeddings_full"

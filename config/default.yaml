@@ -1,5 +1,5 @@
 runmode: FULL
-dataset_root: "data/webface_00_150"
+dataset_root: "data/webface_112x112"
 output_root: "outputs/webface_arcada_adapter"
 device: "auto"
 adapter_type: "linear"
@@ -15,7 +15,7 @@ train_id_fraction: 0.70
 val_id_fraction: 0.15
 test_id_fraction: 0.15
 batch_size: 256
-num_epochs: 50
+num_epochs: 25
 learning_rate: 0.001
 weight_decay: 0.0001
 mse_loss_weight: 0.0
@@ -38,6 +38,9 @@ num_inference_steps: 25
 guidance_scale: 3.0
 impostors_per_probe: 20
 adapter_run_mode: full
+inference_num_identities: 10
+inference_images_per_identity: 1
+save_comparison_figures: true
 use_test_split_from_notebook1: true
 adaface_repo: "minchul/cvlface_adaface_ir50_ms1mv2"
 arc2face_repo: "FoivosPar/Arc2Face"

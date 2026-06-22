@@ -14,7 +14,11 @@ def _parse_args():
     parser.add_argument("--input-image", type=str, default=None)
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--num-images-per-prompt", type=int, default=None)
-    parser.add_argument("--max-images-per-identity", type=int, default=None)
+    parser.add_argument("--num-identities", type=int, default=None)
+    parser.add_argument("--images-per-identity", type=int, default=None)
+    parser.add_argument("--save-comparison-figures", dest="save_comparison_figures", action="store_true")
+    parser.add_argument("--no-save-comparison-figures", dest="save_comparison_figures", action="store_false")
+    parser.set_defaults(save_comparison_figures=None)
     parser.add_argument("--seed", type=int, default=None)
     return parser.parse_args()
 
@@ -37,14 +41,19 @@ def main():
             cfg=cfg,
             input_dir=Path(args.input_dir),
             output_dir=Path(args.output_dir) if args.output_dir else None,
+            num_identities=args.num_identities,
+            images_per_identity=args.images_per_identity,
             num_images_per_prompt=args.num_images_per_prompt,
-            max_images_per_identity=args.max_images_per_identity,
+            save_comparison_figures=args.save_comparison_figures,
             seed=args.seed,
         )
     else:
         raise ValueError("Provide either --input-image or --input-dir")
     print("Adapter:", result["adapter_path"])
     print("Results written to:", result["output_dir"])
+    if "summary" in result:
+        print("Summary:")
+        print(result["summary"])
     print(result["results"])
 
 

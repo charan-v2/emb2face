@@ -8,7 +8,7 @@ The repository is organized so the real logic lives in Python modules under `src
 
 - `train`: extracts paired embeddings, trains the adapter, and writes the split metadata.
 - `attack`: loads the trained adapter and runs the inversion attack experiments.
-- `infer`: loads the trained adapter and runs Arc2Face reconstruction on a folder of images.
+- `infer`: samples identities/images from a dataset-style folder and runs Arc2Face reconstruction.
 - `all`: runs training first, then the attack pipeline.
 
 ## Project layout
@@ -65,16 +65,16 @@ python -m emb2face train --config config/default.yaml
 python -m emb2face attack --config config/default.yaml
 ```
 
-5. Run the Arc2Face inference pipeline on a folder of images.
+5. Run the Arc2Face inference pipeline on a folder of identities.
 
 ```bash
-python -m emb2face infer --config config/default.yaml --input-dir /path/to/images
+python -m emb2face infer --config config/default.yaml --input-dir /path/to/dataset_root
 ```
 
-To limit how many images are taken from each identity folder:
+To sample a presentation set, pick identities first and then images per identity:
 
 ```bash
-python -m emb2face infer --config config/default.yaml --input-dir /path/to/images --max-images-per-identity 5
+python -m emb2face infer --config config/default.yaml --input-dir /path/to/dataset_root --num-identities 10 --images-per-identity 1 --save-comparison-figures
 ```
 
 6. Run the Arc2Face inference pipeline on a single image and save the comparison panel.
@@ -131,6 +131,10 @@ The pipeline writes artifacts under `output_root`, grouped by run mode:
 - `reports_<runmode>/`: CSV metrics, plots, and split metadata
 - `embeddings_<runmode>/`: saved source embeddings and checkpoints
 - `attack_<runmode>/`: evaluation embeddings, reconstructions, and reports
+- `inference_<runmode>/`: sampled inference reconstructions, comparison figures, and CSV reports
+  - `selected_samples.csv`: sampled identities/images
+  - `inference_report.csv`: per-image reconstruction scores and paths
+  - `summary.csv`: aggregate metrics for the sampled set
 
 ## Notes
 
