@@ -11,7 +11,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "dataset_root": "./data/webface_112x112",
     "output_root": "./outputs/webface_arcada_adapter",
     "image_extensions": [".jpg", ".jpeg", ".png", ".bmp"],
-    "seed": 42,
+    "seed": None,
     "device": "auto",  # "auto", "cuda", "mps", or "cpu"
     "det_size": [640, 640],
     "require_single_face": False,
@@ -52,6 +52,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "inference_num_identities": 10,
     "inference_images_per_identity": 1,
     "save_comparison_figures": True,
+    "inference_score_max_retries": 3,
     "use_test_split_from_notebook1": True,
     "adaface_repo": "minchul/cvlface_adaface_ir50_ms1mv2",
     "arc2face_repo": "FoivosPar/Arc2Face",

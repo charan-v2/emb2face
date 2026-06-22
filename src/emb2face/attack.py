@@ -126,9 +126,9 @@ def build_eval_set(cfg: dict):
 
             meta = pd.read_csv(meta_csv)
             ids = sorted(meta["identity"].unique())
-            _, tmp = train_test_split(ids, test_size=1 - cfg["train_id_fraction"], random_state=cfg["seed"])
+            _, tmp = train_test_split(ids, test_size=1 - cfg["train_id_fraction"], random_state=cfg.get("seed"))
             vr = cfg["val_id_fraction"] / (cfg["val_id_fraction"] + cfg["test_id_fraction"])
-            _, test_ids = train_test_split(tmp, test_size=1 - vr, random_state=cfg["seed"])
+            _, test_ids = train_test_split(tmp, test_size=1 - vr, random_state=cfg.get("seed"))
             test_ids = sorted(test_ids)
         else:
             raise FileNotFoundError("Run the training pipeline first so paired metadata exists.")
@@ -169,7 +169,9 @@ def generate(pipeline, project_face_embs, emb512, n, seed, device, cfg):
     id_emb = torch.from_numpy(np.asarray(emb512, dtype=np.float32)).to(device, dtype)[None]
     id_emb = id_emb / torch.norm(id_emb, dim=1, keepdim=True)
     proj = project_face_embs(pipeline, id_emb)
-    g = torch.Generator(device=device).manual_seed(seed)
+    if seed is None:
+        seed = random.SystemRandom().randint(0, 2**32 - 1)
+    g = torch.Generator(device=device).manual_seed(int(seed))
     return pipeline(
         prompt_embeds=proj,
         num_inference_steps=cfg["num_inference_steps"],
@@ -245,7 +247,7 @@ def run_attack_pipeline(cfg: dict):
                     project_face_embs,
                     embedding_for(exp, idx, src_arc, src_ada, adapter, device),
                     cfg["num_recon_per_image"],
-                    cfg["seed"] + idx,
+                    (cfg.get("seed") + idx) if cfg.get("seed") is not None else None,
                     device,
                     cfg,
                 )
@@ -286,7 +288,7 @@ def run_attack_pipeline(cfg: dict):
     for i, ident in enumerate(eval_df["identity"]):
         id_to_idx[ident].append(i)
     all_idx = list(range(len(eval_df)))
-    rng = random.Random(cfg["seed"])
+    rng = random.Random(cfg.get("seed"))
 
     typeI_rows, typeI_summary, typeI_scores = [], [], []
     for exp in cfg["experiments"]:

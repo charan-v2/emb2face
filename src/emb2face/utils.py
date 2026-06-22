@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from collections import defaultdict
 import random
 from typing import Tuple, List
@@ -34,7 +36,9 @@ def far_frr_at(labels, scores, threshold: float) -> Tuple[float, float]:
     return far, frr
 
 
-def set_seed(seed: int) -> None:
+def set_seed(seed: int | None) -> None:
+    if seed is None:
+        return
     random.seed(seed)
     np.random.seed(seed)
     try:
@@ -47,7 +51,7 @@ def set_seed(seed: int) -> None:
         pass
 
 
-def sample_verification_pairs(df_split, embeddings: np.ndarray, n_pairs: int = 3000, seed: int = 42):
+def sample_verification_pairs(df_split, embeddings: np.ndarray, n_pairs: int = 3000, seed: int | None = None):
     rng = random.Random(seed)
     by_identity = defaultdict(list)
 

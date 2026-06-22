@@ -32,16 +32,17 @@ def total_loss(pred, target, mse_weight: float, cosine_weight: float):
 
 def split_identities(paired_df: pd.DataFrame, cfg: dict):
     identities = sorted(paired_df["identity"].unique())
+    seed = cfg.get("seed")
     train_ids, temp_ids = train_test_split(
         identities,
         test_size=1 - cfg["train_id_fraction"],
-        random_state=cfg["seed"],
+        random_state=seed,
     )
     val_ratio_within_temp = cfg["val_id_fraction"] / (cfg["val_id_fraction"] + cfg["test_id_fraction"])
     val_ids, test_ids = train_test_split(
         temp_ids,
         test_size=1 - val_ratio_within_temp,
-        random_state=cfg["seed"],
+        random_state=seed,
     )
 
     train_id_set = set(train_ids)

@@ -66,7 +66,7 @@ def eval_verification(df_subset, emb_matrix, split_name: str, label: str, cfg: d
         local_df,
         emb_matrix,
         n_pairs=cfg["pairs_per_split"],
-        seed=cfg["seed"],
+        seed=cfg.get("seed"),
     )
     eer, threshold = compute_eer(labels, scores)
     return {
