@@ -21,6 +21,7 @@ The repository is organized so the real logic lives in Python modules under `src
 - `config/default.yaml`: default config you can copy and edit
 - `notebooks/01_adapter_training.ipynb`: thin notebook wrapper for training
 - `notebooks/02_inversion_attack_eval.ipynb`: thin notebook wrapper for attack evaluation
+- `notebooks/03_colab_inference.ipynb`: Colab-ready Arc2Face inference notebook
 
 ## Requirements
 
