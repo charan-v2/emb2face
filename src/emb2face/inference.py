@@ -18,7 +18,7 @@ from tqdm.auto import tqdm
 from PIL import Image
 
 from .embeddings import arcface_from_image, load_adaface_model, load_arcface_app, setup_device, source_embeddings
-from .models import LinearAdapter, MLPAdapter
+from .models import LinearAdapter, MLPAdapter, ResidualMLPAdapter
 from .utils import cosine_similarity_np, l2_normalize
 
 
@@ -77,21 +77,35 @@ def load_arc2face_pipeline(cfg: dict, device: torch.device):
 
 
 def load_best_adapter(cfg: dict, device: torch.device):
-    model_dir = cfg["output_root"] / f"models_{cfg['adapter_run_mode']}"
-    candidates = sorted(model_dir.glob("best_*_adapter.pt"))
-    if not candidates:
-        raise FileNotFoundError(f"No adapter checkpoint found in {model_dir}")
-    ckpt = torch.load(candidates[0], map_location=device, weights_only=False)
+    explicit_ckpt = cfg.get("inference_adapter_checkpoint")
+    if explicit_ckpt is not None:
+        ckpt_path = Path(explicit_ckpt)
+        if not ckpt_path.exists():
+            raise FileNotFoundError(f"Explicit adapter checkpoint not found: {ckpt_path}")
+    else:
+        model_dir = cfg["output_root"] / f"models_{cfg['adapter_run_mode']}"
+        candidates = sorted(model_dir.glob("best_*_adapter.pt"))
+        if not candidates:
+            raise FileNotFoundError(f"No adapter checkpoint found in {model_dir}")
+        ckpt_path = candidates[0]
+
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     acfg = ckpt.get("config", {})
     atype = acfg.get("adapter_type", "linear")
-    adapter = (
-        LinearAdapter(512)
-        if atype == "linear"
-        else MLPAdapter(512, acfg.get("hidden_dim", 1024), acfg.get("dropout", 0.1))
-    ).to(device)
+    hidden_dim = acfg.get("hidden_dim", 1024)
+    dropout = acfg.get("dropout", 0.1)
+    if atype == "linear":
+        adapter = LinearAdapter(512)
+    elif atype == "mlp":
+        adapter = MLPAdapter(512, hidden_dim, dropout)
+    elif atype == "residual_mlp":
+        adapter = ResidualMLPAdapter(512, hidden_dim, dropout)
+    else:
+        raise ValueError(f"Unsupported adapter_type in checkpoint: {atype}")
+    adapter = adapter.to(device)
     adapter.load_state_dict(ckpt["state_dict"])
     adapter.eval()
-    return adapter, candidates[0]
+    return adapter, ckpt_path
 
 
 def collect_identity_images(input_dir: Path, exts: Iterable[str]) -> dict[str, list[Path]]:

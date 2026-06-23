@@ -49,6 +49,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "guidance_scale": 3.0,
     "impostors_per_probe": 20,
     "adapter_run_mode": "full",
+    "inference_adapter_checkpoint": None,
     "inference_num_identities": 10,
     "inference_images_per_identity": 1,
     "save_comparison_figures": True,
@@ -62,7 +63,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 
 def _coerce_paths(cfg: dict[str, Any]) -> dict[str, Any]:
-    for key in ("dataset_root", "output_root", "eval_dataset_root", "insight_root", "arc2face_local_dir"):
+    for key in (
+        "dataset_root",
+        "output_root",
+        "eval_dataset_root",
+        "insight_root",
+        "arc2face_local_dir",
+        "inference_adapter_checkpoint",
+    ):
         if key in cfg and cfg[key] is not None:
             cfg[key] = Path(cfg[key]).expanduser()
     return cfg

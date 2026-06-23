@@ -25,6 +25,21 @@ class MLPAdapter(nn.Module):
         return self.net(x)
 
 
+class ResidualMLPAdapter(nn.Module):
+    def __init__(self, dim: int = 512, hidden_dim: int = 1024, dropout: float = 0.1):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Linear(dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, dim),
+        )
+
+    def forward(self, x):
+        return x + self.block(x)
+
+
 class PairDataset(torch.utils.data.Dataset):
     def __init__(self, df_subset, ada_embeddings, arc_embeddings):
         self.df = df_subset.reset_index(drop=True)

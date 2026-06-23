@@ -15,6 +15,7 @@ def _parse_args(argv=None):
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--eval-source", type=str, default=None)
     parser.add_argument("--adapter-run-mode", type=str, default=None)
+    parser.add_argument("--inference-adapter-checkpoint", type=str, default=None)
     parser.add_argument("--experiments", type=str, default=None, help="Comma-separated experiment list")
     parser.add_argument("--input-dir", type=str, default=None, help="Input directory for inference")
     parser.add_argument("--input-image", type=str, default=None, help="Single image for inference")
@@ -38,6 +39,7 @@ def main(argv=None):
         "device": args.device,
         "eval_source": args.eval_source,
         "adapter_run_mode": args.adapter_run_mode,
+        "inference_adapter_checkpoint": args.inference_adapter_checkpoint,
         "seed": args.seed,
     }
     if args.experiments:

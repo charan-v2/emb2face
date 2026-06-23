@@ -18,6 +18,7 @@ The repository is organized so the real logic lives in Python modules under `src
 - `src/emb2face/embeddings.py`: dataset scan, face loading, and embedding extraction
 - `src/emb2face/train.py`: adapter training pipeline
 - `src/emb2face/attack.py`: inversion attack pipeline
+- `scripts/run_residual_mlp_sweep.py`: convenience wrapper for residual MLP hidden-dim sweeps
 - `config/default.yaml`: default config you can copy and edit
 - `notebooks/01_adapter_training.ipynb`: thin notebook wrapper for training
 - `notebooks/02_inversion_attack_eval.ipynb`: thin notebook wrapper for attack evaluation
@@ -60,6 +61,12 @@ Key paths to set:
 python -m emb2face train --config config/default.yaml
 ```
 
+To train the new residual MLP adapter, set `adapter_type: residual_mlp` in a config file and choose `hidden_dim` as `1024` or `2048`. For the two-run sweep, use:
+
+```bash
+python scripts/run_residual_mlp_sweep.py --config config/default.yaml
+```
+
 4. Run the attack/evaluation pipeline.
 
 ```bash
@@ -82,6 +89,12 @@ python -m emb2face infer --config config/default.yaml --input-dir /path/to/datas
 
 ```bash
 python -m emb2face infer --config config/default.yaml --input-image /path/to/image.jpg
+```
+
+If you want inference to use a specific adapter checkpoint, set `inference_adapter_checkpoint` in the config to the exact `.pt` file path. For example:
+
+```yaml
+inference_adapter_checkpoint: outputs/webface_arcada_adapter/models_full/best_residual_mlp_adapter.pt
 ```
 
 7. Or do both in one go.

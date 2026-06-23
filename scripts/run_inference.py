@@ -13,6 +13,7 @@ def _parse_args():
     parser.add_argument("--input-dir", type=str, default=None)
     parser.add_argument("--input-image", type=str, default=None)
     parser.add_argument("--output-dir", type=str, default=None)
+    parser.add_argument("--inference-adapter-checkpoint", type=str, default=None)
     parser.add_argument("--num-images-per-prompt", type=int, default=None)
     parser.add_argument("--num-identities", type=int, default=None)
     parser.add_argument("--images-per-identity", type=int, default=None)
@@ -26,6 +27,8 @@ def _parse_args():
 def main():
     args = _parse_args()
     cfg = load_config(args.config)
+    if args.inference_adapter_checkpoint:
+        cfg["inference_adapter_checkpoint"] = Path(args.inference_adapter_checkpoint).expanduser()
     if args.input_image and args.input_dir:
         raise ValueError("Use only one of --input-image or --input-dir")
     if args.input_image:

@@ -12,20 +12,20 @@ from tqdm.auto import tqdm
 
 from .embeddings import collect_and_extract_embeddings, setup_device
 from .evaluate import eval_all_verification, eval_embedding_alignment
-from .models import LinearAdapter, MLPAdapter, PairDataset
+from .models import LinearAdapter, MLPAdapter, PairDataset, ResidualMLPAdapter
 
 
 def cosine_loss(pred, target):
-    pred = F.normalize(pred, dim=1)
-    target = F.normalize(target, dim=1)
-    return 1 - (pred * target).sum(dim=1).mean()
+    pred_n = F.normalize(pred, dim=1)
+    target_n = F.normalize(target, dim=1)
+    return 1 - F.cosine_similarity(pred_n, target_n, dim=1).mean()
 
 
 def total_loss(pred, target, mse_weight: float, cosine_weight: float):
-    pred = F.normalize(pred, dim=1)
-    target = F.normalize(target, dim=1)
-    mse = F.mse_loss(pred, target)
-    cos = 1 - (pred * target).sum(dim=1).mean()
+    pred_n = F.normalize(pred, dim=1)
+    target_n = F.normalize(target, dim=1)
+    mse = F.mse_loss(pred_n, target_n)
+    cos = 1 - F.cosine_similarity(pred_n, target_n, dim=1).mean()
     loss = mse_weight * mse + cosine_weight * cos
     return loss, mse.detach(), cos.detach()
 
@@ -65,12 +65,15 @@ def split_identities(paired_df: pd.DataFrame, cfg: dict):
 
 
 def get_adapter(cfg: dict, device: torch.device):
+    hidden_dim = cfg.get("hidden_dim") or 1024
     if cfg["adapter_type"] == "linear":
         model = LinearAdapter(512)
     elif cfg["adapter_type"] == "mlp":
-        model = MLPAdapter(512, cfg["hidden_dim"], cfg["dropout"])
+        model = MLPAdapter(512, hidden_dim, cfg["dropout"])
+    elif cfg["adapter_type"] == "residual_mlp":
+        model = ResidualMLPAdapter(512, hidden_dim, cfg["dropout"])
     else:
-        raise ValueError("adapter_type must be linear or mlp")
+        raise ValueError("adapter_type must be linear, mlp, or residual_mlp")
     return model.to(device)
 
 
