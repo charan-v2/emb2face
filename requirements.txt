@@ -24,3 +24,5 @@ fvcore==0.1.5.post20221221
 iopath==0.1.10
 PyYAML==6.0.3
 omegaconf==2.3.1
+uniface[gpu] ; platform_system=="Linux"
+uniface[cpu] ; platform_system!="Linux"

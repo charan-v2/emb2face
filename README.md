@@ -154,6 +154,8 @@ If you prefer shell commands after the notebook bootstrap has run, you can still
 
 This repo includes a GPU-ready [`Dockerfile`](./Dockerfile).
 
+For a full end-to-end GPU checklist, see [GPU_RUNBOOK.md](/Users/charan/Projects/OVGU/emb2face/GPU_RUNBOOK.md).
+
 Build it from the repository root:
 
 ```bash
