@@ -2,7 +2,7 @@ runmode: FULL
 dataset_root: "data/webface_112x112"
 output_root: "outputs/webface_arcada_adapter"
 device: "auto"
-adapter_type: "linear"  # "linear", "mlp", or "residual_mlp"
+adapter_type: "mlp"  # "linear", "mlp", or "residual_mlp"
 seed: null
 det_size: [640, 640]
 require_single_face: false
