@@ -26,7 +26,7 @@ The repository is organized so the real logic lives in Python modules under `src
 
 ## Requirements
 
-- Python 3.9 or newer
+- Python 3.10 or newer
 - A CUDA GPU is strongly recommended for the attack pipeline
 - Access to the face datasets and model downloads used by the pipeline
 
@@ -85,7 +85,30 @@ To sample a presentation set, pick identities first and then images per identity
 python -m emb2face infer --config config/default.yaml --input-dir /path/to/dataset_root --num-identities 10 --images-per-identity 1 --save-comparison-figures
 ```
 
-6. Run the Arc2Face inference pipeline on a single image and save the comparison panel.
+This step only generates reconstructions and run metadata. Similarity and biometric metrics are computed later from the saved run folder.
+
+6. Run the scoring pipeline on a previous inference run folder.
+
+```bash
+python -m emb2face score --config config/default.yaml --input-run-dir /path/to/inference_run
+```
+
+By default the scoring pipeline uses `retinaface` for detection/alignment and `uniface` for embeddings. You can override both:
+
+```bash
+python -m emb2face score --config config/default.yaml --input-run-dir /path/to/inference_run --score-detector-backend insightface --score-embedder-backend insightface
+```
+
+If you use the default scoring backend, install UniFace first with `pip install uniface[cpu]` or `pip install uniface[gpu]`.
+
+The scoring step writes:
+
+- `verification_eval.csv`: FAR, FRR, FMR, FNMR, EER, and threshold summary per reconstruction method
+- `verification_scores.csv`: flattened pairwise verification scores
+- `det_curve.csv`: DET curve points
+- `det_curve.png`: quick visual check of the DET curve
+
+7. Run the Arc2Face inference pipeline on a single image and save the comparison panel.
 
 ```bash
 python -m emb2face infer --config config/default.yaml --input-image /path/to/image.jpg
@@ -97,7 +120,7 @@ If you want inference to use a specific adapter checkpoint, set `inference_adapt
 inference_adapter_checkpoint: outputs/webface_arcada_adapter/models_full/best_residual_mlp_adapter.pt
 ```
 
-7. Or do both in one go.
+8. Or do both in one go.
 
 ```bash
 python -m emb2face all --config config/default.yaml
@@ -147,8 +170,13 @@ The pipeline writes artifacts under `output_root`, grouped by run mode:
 - `attack_<runmode>/`: evaluation embeddings, reconstructions, and reports
 - `inference_<runmode>/`: sampled inference reconstructions, comparison figures, and CSV reports
   - `selected_samples.csv`: sampled identities/images
-  - `inference_report.csv`: per-image reconstruction scores and paths
-  - `summary.csv`: aggregate metrics for the sampled set
+  - `inference_report.csv`: per-image reconstruction paths and metadata
+  - `summary.csv`: aggregate sampling / generation stats for the sampled set
+- `inference_<runmode>/<run_id>/biometric_eval/`: biometric scores for a previous inference run
+  - `verification_eval.csv`: FAR, FRR, FMR, FNMR, EER, and threshold summary
+  - `verification_scores.csv`: pairwise score table
+  - `det_curve.csv`: DET curve data
+  - `det_curve.png`: DET curve plot
 
 ## Notes
 

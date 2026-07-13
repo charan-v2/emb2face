@@ -7,7 +7,7 @@ from .config import load_config
 
 def _parse_args(argv=None):
     parser = argparse.ArgumentParser(prog="emb2face")
-    parser.add_argument("command", choices=["train", "attack", "infer", "all"])
+    parser.add_argument("command", choices=["train", "attack", "infer", "score", "all"])
     parser.add_argument("--config", type=str, default=None)
     parser.add_argument("--runmode", type=str, default=None)
     parser.add_argument("--dataset-root", type=str, default=None)
@@ -19,10 +19,14 @@ def _parse_args(argv=None):
     parser.add_argument("--experiments", type=str, default=None, help="Comma-separated experiment list")
     parser.add_argument("--input-dir", type=str, default=None, help="Input directory for inference")
     parser.add_argument("--input-image", type=str, default=None, help="Single image for inference")
+    parser.add_argument("--input-run-dir", type=str, default=None, help="Previous inference run directory for scoring")
     parser.add_argument("--output-dir", type=str, default=None, help="Output directory for inference")
     parser.add_argument("--num-images-per-prompt", type=int, default=None)
     parser.add_argument("--num-identities", type=int, default=None)
     parser.add_argument("--images-per-identity", type=int, default=None)
+    parser.add_argument("--score-detector-backend", type=str, default=None)
+    parser.add_argument("--score-embedder-backend", type=str, default=None)
+    parser.add_argument("--score-methods", type=str, default=None, help="Comma-separated reconstruction methods to score")
     parser.add_argument("--save-comparison-figures", dest="save_comparison_figures", action="store_true")
     parser.add_argument("--no-save-comparison-figures", dest="save_comparison_figures", action="store_false")
     parser.set_defaults(save_comparison_figures=None)
@@ -40,6 +44,8 @@ def main(argv=None):
         "eval_source": args.eval_source,
         "adapter_run_mode": args.adapter_run_mode,
         "inference_adapter_checkpoint": args.inference_adapter_checkpoint,
+        "score_detector_backend": args.score_detector_backend,
+        "score_embedder_backend": args.score_embedder_backend,
         "seed": args.seed,
     }
     if args.experiments:
@@ -81,6 +87,22 @@ def main(argv=None):
             )
         else:
             raise ValueError("Provide either --input-image or --input-dir for infer")
+    if args.command == "score":
+        from .score_run import run_score_pipeline
+
+        if not args.input_run_dir:
+            raise ValueError("Provide --input-run-dir for score")
+        selected_methods = None
+        if args.score_methods:
+            selected_methods = [x.strip() for x in args.score_methods.split(",") if x.strip()]
+        result = run_score_pipeline(
+            cfg,
+            input_run_dir=Path(args.input_run_dir),
+            output_dir=Path(args.output_dir) if args.output_dir else None,
+            selected_methods=selected_methods,
+        )
+        print("Results written to:", result["output_dir"])
+        print(result["summary"])
 
 
 if __name__ == "__main__":

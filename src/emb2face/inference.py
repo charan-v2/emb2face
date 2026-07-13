@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import random
 import uuid
@@ -17,9 +18,9 @@ from huggingface_hub import hf_hub_download
 from tqdm.auto import tqdm
 from PIL import Image
 
-from .embeddings import arcface_from_image, load_adaface_model, load_arcface_app, setup_device, source_embeddings
+from .embeddings import load_adaface_model, load_arcface_app, setup_device, source_embeddings
 from .models import LinearAdapter, MLPAdapter, ResidualMLPAdapter
-from .utils import cosine_similarity_np, l2_normalize
+from .utils import l2_normalize
 
 
 LOGGER = logging.getLogger(__name__)
@@ -210,42 +211,7 @@ def generate_from_embedding(
     ).images
 
 
-def _score_generated_image(source_arc_emb: np.ndarray, image_path: Path, arc_app) -> tuple[float | None, str]:
-    import cv2
-
-    if not image_path.exists():
-        return None, "generated_image_missing"
-
-    img_bgr = cv2.imread(str(image_path))
-    if img_bgr is None:
-        return None, "generated_image_unreadable"
-
-    recon_arc, _ = None, None
-    try:
-        recon_arc = arcface_from_image(image_path, arc_app)
-    except Exception as exc:
-        LOGGER.warning("ArcFace scoring failed for %s: %s", image_path, exc)
-        return None, f"arcface_scoring_error:{exc.__class__.__name__}"
-
-    if recon_arc is None:
-        return None, "face_not_detected_by_arcface"
-
-    return cosine_similarity_np(source_arc_emb, recon_arc), "ok"
-
-
-def _score_generated_images(source_arc_emb: np.ndarray, image_paths: list[Path], arc_app) -> list[tuple[float | None, str]]:
-    return [_score_generated_image(source_arc_emb, p, arc_app) for p in image_paths]
-
-
-def _score_text(score: float | None, reason: str | None) -> str:
-    if score is not None:
-        return f"Similarity: {score:.4f}"
-    if reason:
-        return f"Similarity: N/A ({reason})"
-    return "Similarity: N/A"
-
-
-def _generate_reconstruction_with_retries(
+def _generate_reconstruction(
     *,
     cfg: dict,
     pipeline,
@@ -254,65 +220,24 @@ def _generate_reconstruction_with_retries(
     label: str,
     stem: str,
     sample_dir: Path,
-    source_arc: np.ndarray,
-    arc_app,
     device: torch.device,
-    base_seed: int,
-    max_retries: int,
-) -> tuple[list[object], list[Path], float | None, str, int]:
-    attempts_dir = sample_dir / f"{label}_attempts"
-    attempts_dir.mkdir(parents=True, exist_ok=True)
-
-    final_images = None
-    final_paths = None
-    final_score = None
-    final_reason = "no_generated_image"
-    attempts = 0
-
-    for attempt in range(max_retries + 1):
-        seed = base_seed + attempt
-        images = generate_from_embedding(
-            pipeline,
-            project_face_embs,
-            embedding,
-            int(cfg["num_recon_per_image"]),
-            seed,
-            device,
-            cfg,
-        )
-        attempt_dir = attempts_dir / f"attempt_{attempt}"
-        attempt_dir.mkdir(parents=True, exist_ok=True)
-        attempt_paths = []
-        for idx, image in enumerate(images):
-            attempt_path = attempt_dir / f"{stem}_{label}_{idx}.png"
-            image.save(attempt_path)
-            attempt_paths.append(attempt_path)
-        attempts += 1
-
-        score, reason = _score_generated_image(source_arc, attempt_paths[0], arc_app)
-        LOGGER.info(
-            "[inference-retry] label=%s attempt=%d/%d seed=%d score=%s reason=%s",
-            label,
-            attempt + 1,
-            max_retries + 1,
-            seed,
-            "ok" if score is not None else "N/A",
-            reason,
-        )
-
-        final_images = images
-        final_paths = [sample_dir / f"{stem}_{label}_{idx}.png" for idx in range(len(images))]
-        final_score = score
-        final_reason = reason
-        if score is not None:
-            for image, path in zip(images, final_paths):
-                image.save(path)
-            return final_images, final_paths, final_score, final_reason, attempts
-
-    if final_images is not None and final_paths is not None:
-        for image, path in zip(final_images, final_paths):
-            image.save(path)
-    return final_images or [], final_paths or [], final_score, final_reason, attempts
+    seed: int,
+) -> tuple[list[object], list[Path]]:
+    images = generate_from_embedding(
+        pipeline,
+        project_face_embs,
+        embedding,
+        int(cfg["num_recon_per_image"]),
+        seed,
+        device,
+        cfg,
+    )
+    paths: list[Path] = []
+    for idx, image in enumerate(images):
+        path = sample_dir / f"{stem}_{label}_{idx}.png"
+        image.save(path)
+        paths.append(path)
+    return images, paths
 
 
 def _process_sample(
@@ -366,8 +291,7 @@ def _process_sample(
     sample_recon_dir = recon_dir / identity / stem
     sample_recon_dir.mkdir(parents=True, exist_ok=True)
 
-    max_retries = int(cfg.get("inference_score_max_retries", 0))
-    adaface_images, adaface_paths, adaface_score, adaface_reason, adaface_attempts = _generate_reconstruction_with_retries(
+    adaface_images, adaface_paths = _generate_reconstruction(
         cfg=cfg,
         pipeline=pipeline,
         project_face_embs=project_face_embs,
@@ -375,13 +299,10 @@ def _process_sample(
         label="adaface_native",
         stem=stem,
         sample_dir=sample_recon_dir,
-        source_arc=source_arc,
-        arc_app=arc_app,
         device=device,
         base_seed=base_seed + sample_index * 10 + 1,
-        max_retries=max_retries,
     )
-    adapter_images, adapter_paths_out, adapter_score, adapter_reason, adapter_attempts = _generate_reconstruction_with_retries(
+    adapter_images, adapter_paths_out = _generate_reconstruction(
         cfg=cfg,
         pipeline=pipeline,
         project_face_embs=project_face_embs,
@@ -389,13 +310,10 @@ def _process_sample(
         label="adaface_adapter",
         stem=stem,
         sample_dir=sample_recon_dir,
-        source_arc=source_arc,
-        arc_app=arc_app,
         device=device,
         base_seed=base_seed + sample_index * 10,
-        max_retries=max_retries,
     )
-    arcface_images, arc_paths, arcface_score, arcface_reason, arcface_attempts = _generate_reconstruction_with_retries(
+    arcface_images, arc_paths = _generate_reconstruction(
         cfg=cfg,
         pipeline=pipeline,
         project_face_embs=project_face_embs,
@@ -403,20 +321,9 @@ def _process_sample(
         label="arcface_native",
         stem=stem,
         sample_dir=sample_recon_dir,
-        source_arc=source_arc,
-        arc_app=arc_app,
         device=device,
         base_seed=base_seed + sample_index * 10 + 2,
-        max_retries=max_retries,
     )
-
-    for label, score, reason, path in [
-        ("adaface_native", adaface_score, adaface_reason, adaface_paths[0] if adaface_paths else None),
-        ("adapter", adapter_score, adapter_reason, adapter_paths_out[0] if adapter_paths_out else None),
-        ("arcface", arcface_score, arcface_reason, arc_paths[0] if arc_paths else None),
-    ]:
-        if score is None:
-            LOGGER.warning("Similarity unavailable for %s on %s: %s", label, path, reason)
 
     comparison_path = None
     if save_comparison_figures and figures_dir is not None:
@@ -429,12 +336,6 @@ def _process_sample(
             adaface_image=adaface_images[0] if adaface_images else source_rgb,
             adapter_image=adapter_images[0] if adapter_images else source_rgb,
             arcface_image=arcface_images[0] if arcface_images else source_rgb,
-            adaface_score=adaface_score,
-            adapter_score=adapter_score,
-            arcface_score=arcface_score,
-            adaface_reason=adaface_reason,
-            adapter_reason=adapter_reason,
-            arcface_reason=arcface_reason,
             output_path=comparison_path,
         )
 
@@ -446,17 +347,12 @@ def _process_sample(
         "status": "ok",
         "arcface_source_path": str(image_path),
         "adaface_native_recon_path": str(adaface_paths[0]) if adaface_paths else None,
+        "adaface_native_recon_paths": json.dumps([str(p) for p in adaface_paths]),
         "adapter_recon_path": str(adapter_paths_out[0]) if adapter_paths_out else None,
+        "adapter_recon_paths": json.dumps([str(p) for p in adapter_paths_out]),
         "arcface_recon_path": str(arc_paths[0]) if arc_paths else None,
-        "adaface_native_similarity_reason": adaface_reason,
-        "adapter_similarity_reason": adapter_reason,
-        "arcface_similarity_reason": arcface_reason,
-        "adaface_native_similarity": adaface_score,
-        "adapter_similarity": adapter_score,
-        "arcface_similarity": arcface_score,
-        "adaface_native_generation_attempts": adaface_attempts,
-        "adapter_generation_attempts": adapter_attempts,
-        "arcface_generation_attempts": arcface_attempts,
+        "arcface_recon_paths": json.dumps([str(p) for p in arc_paths]),
+        "num_generated_images": int(len(adaface_images)),
         "comparison_path": str(comparison_path) if comparison_path else None,
         "adapter_path": str(adapter_path),
     }
@@ -471,9 +367,7 @@ def build_summary(result_df: pd.DataFrame, requested_identities: int | None, ima
         "requested_identities": requested_identities,
         "images_per_identity": images_per_identity,
         "save_comparison_figures": save_comparison_figures,
-        "mean_adaface_native_similarity": float(ok["adaface_native_similarity"].mean()) if len(ok) else float("nan"),
-        "mean_adapter_similarity": float(ok["adapter_similarity"].mean()) if len(ok) else float("nan"),
-        "mean_arcface_similarity": float(ok["arcface_similarity"].mean()) if len(ok) else float("nan"),
+        "num_generated_images": float(ok["num_generated_images"].mean()) if len(ok) else float("nan"),
     }
     return pd.DataFrame([summary])
 
@@ -484,13 +378,7 @@ def _save_single_image_figure(
     adaface_image,
     adapter_image,
     arcface_image,
-    adaface_score: float | None,
-    adapter_score: float | None,
-    arcface_score: float | None,
     output_path: Path,
-    adaface_reason: str | None = None,
-    adapter_reason: str | None = None,
-    arcface_reason: str | None = None,
 ):
     import matplotlib
 
@@ -506,38 +394,14 @@ def _save_single_image_figure(
     axes[1].imshow(adaface_image)
     axes[1].set_title("AdaFace -> Arc2Face")
     axes[1].axis("off")
-    axes[1].text(
-        0.5,
-        -0.08,
-        _score_text(adaface_score, adaface_reason),
-        ha="center",
-        transform=axes[1].transAxes,
-        fontsize=11,
-    )
 
     axes[2].imshow(adapter_image)
     axes[2].set_title("AdaFace -> ArcFace -> Arc2Face")
     axes[2].axis("off")
-    axes[2].text(
-        0.5,
-        -0.08,
-        _score_text(adapter_score, adapter_reason),
-        ha="center",
-        transform=axes[2].transAxes,
-        fontsize=11,
-    )
 
     axes[3].imshow(arcface_image)
     axes[3].set_title("ArcFace -> Arc2Face")
     axes[3].axis("off")
-    axes[3].text(
-        0.5,
-        -0.08,
-        _score_text(arcface_score, arcface_reason),
-        ha="center",
-        transform=axes[3].transAxes,
-        fontsize=11,
-    )
 
     fig.suptitle(input_path.name)
     plt.tight_layout()
@@ -571,7 +435,6 @@ def run_single_image_inference(
     base_seed = seed if seed is not None else cfg.get("seed")
     if base_seed is None:
         base_seed = _random_seed()
-    max_retries = int(cfg.get("inference_score_max_retries", 0))
 
     emb = source_embeddings(input_image, arc_app, ada_model, device)
     if emb is None:
@@ -602,7 +465,7 @@ def run_single_image_inference(
     adaface_dir.mkdir(parents=True, exist_ok=True)
     arc_dir.mkdir(parents=True, exist_ok=True)
 
-    adapter_images, adapter_paths_out, adapter_score, adapter_reason, adapter_attempts = _generate_reconstruction_with_retries(
+    adapter_images, adapter_paths_out = _generate_reconstruction(
         cfg=cfg,
         pipeline=pipeline,
         project_face_embs=project_face_embs,
@@ -610,13 +473,10 @@ def run_single_image_inference(
         label="adaface_adapter",
         stem=stem,
         sample_dir=adapter_dir,
-        source_arc=source_arc,
-        arc_app=arc_app,
         device=device,
         base_seed=base_seed,
-        max_retries=max_retries,
     )
-    adaface_images, adaface_paths, adaface_score, adaface_reason, adaface_attempts = _generate_reconstruction_with_retries(
+    adaface_images, adaface_paths = _generate_reconstruction(
         cfg=cfg,
         pipeline=pipeline,
         project_face_embs=project_face_embs,
@@ -624,13 +484,10 @@ def run_single_image_inference(
         label="adaface_native",
         stem=stem,
         sample_dir=adaface_dir,
-        source_arc=source_arc,
-        arc_app=arc_app,
         device=device,
         base_seed=base_seed + 1,
-        max_retries=max_retries,
     )
-    arcface_images, arc_paths, arcface_score, arcface_reason, arcface_attempts = _generate_reconstruction_with_retries(
+    arcface_images, arc_paths = _generate_reconstruction(
         cfg=cfg,
         pipeline=pipeline,
         project_face_embs=project_face_embs,
@@ -638,11 +495,8 @@ def run_single_image_inference(
         label="arcface_native",
         stem=stem,
         sample_dir=arc_dir,
-        source_arc=source_arc,
-        arc_app=arc_app,
         device=device,
         base_seed=base_seed + 2,
-        max_retries=max_retries,
     )
 
     comparison_path = output_dir / f"{stem}_comparison.png"
@@ -652,32 +506,24 @@ def run_single_image_inference(
         adaface_image=adaface_images[0] if adaface_images else source_rgb,
         adapter_image=adapter_images[0] if adapter_images else source_rgb,
         arcface_image=arcface_images[0] if arcface_images else source_rgb,
-        adaface_score=adaface_score,
-        adapter_score=adapter_score,
-        arcface_score=arcface_score,
-        adaface_reason=adaface_reason,
-        adapter_reason=adapter_reason,
-        arcface_reason=arcface_reason,
         output_path=comparison_path,
     )
 
     result = pd.DataFrame(
         [
             {
-            "image_path": str(input_image),
+                "image_path": str(input_image),
                 "status": "ok",
                 "run_id": run_id,
                 "adapter_path": str(adapter_path),
                 "comparison_path": str(comparison_path),
                 "adaface_native_recon_path": str(adaface_paths[0]) if adaface_paths else None,
+                "adaface_native_recon_paths": json.dumps([str(p) for p in adaface_paths]),
                 "adapter_recon_path": str(adapter_paths_out[0]) if adapter_paths_out else None,
+                "adapter_recon_paths": json.dumps([str(p) for p in adapter_paths_out]),
                 "arcface_recon_path": str(arc_paths[0]) if arc_paths else None,
-                "adaface_native_similarity": adaface_score,
-                "adapter_similarity": adapter_score,
-                "arcface_similarity": arcface_score,
-                "adaface_native_generation_attempts": adaface_attempts,
-                "adapter_generation_attempts": adapter_attempts,
-                "arcface_generation_attempts": arcface_attempts,
+                "arcface_recon_paths": json.dumps([str(p) for p in arc_paths]),
+                "num_generated_images": int(len(adaface_images)),
             }
         ]
     )

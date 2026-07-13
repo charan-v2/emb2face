@@ -18,6 +18,10 @@ def cosine_similarity_np(a: np.ndarray, b: np.ndarray, eps: float = 1e-12) -> fl
 
 
 def compute_eer(labels, scores) -> Tuple[float, float]:
+    labels = np.asarray(labels)
+    scores = np.asarray(scores)
+    if len(np.unique(labels)) < 2:
+        return float("nan"), float("nan")
     fpr, tpr, thresholds = roc_curve(labels, scores)
     fnr = 1 - tpr
     idx = np.nanargmin(np.abs(fnr - fpr))
@@ -27,6 +31,8 @@ def compute_eer(labels, scores) -> Tuple[float, float]:
 
 
 def far_frr_at(labels, scores, threshold: float) -> Tuple[float, float]:
+    if threshold is None or np.isnan(threshold):
+        return float("nan"), float("nan")
     labels = np.asarray(labels)
     scores = np.asarray(scores)
     gen = scores[labels == 1]
@@ -34,6 +40,44 @@ def far_frr_at(labels, scores, threshold: float) -> Tuple[float, float]:
     frr = float(np.mean(gen < threshold)) if len(gen) else float("nan")
     far = float(np.mean(imp >= threshold)) if len(imp) else float("nan")
     return far, frr
+
+
+def verification_summary(labels, scores) -> dict[str, float]:
+    eer, threshold = compute_eer(labels, scores)
+    if np.isnan(threshold):
+        far, frr = float("nan"), float("nan")
+    else:
+        far, frr = far_frr_at(labels, scores, threshold)
+    return {
+        "eer": eer,
+        "eer_threshold": threshold,
+        "far_at_eer": far,
+        "frr_at_eer": frr,
+        "fmr_at_eer": far,
+        "fnmr_at_eer": frr,
+    }
+
+
+def det_curve_points(labels, scores):
+    labels = np.asarray(labels)
+    scores = np.asarray(scores)
+    if len(np.unique(labels)) < 2:
+        return {
+            "thresholds": np.asarray([], dtype=np.float32),
+            "far": np.asarray([], dtype=np.float32),
+            "frr": np.asarray([], dtype=np.float32),
+            "fmr": np.asarray([], dtype=np.float32),
+            "fnmr": np.asarray([], dtype=np.float32),
+        }
+    fpr, tpr, thresholds = roc_curve(labels, scores)
+    fnr = 1 - tpr
+    return {
+        "thresholds": thresholds,
+        "far": fpr,
+        "frr": fnr,
+        "fmr": fpr,
+        "fnmr": fnr,
+    }
 
 
 def set_seed(seed: int | None) -> None:
