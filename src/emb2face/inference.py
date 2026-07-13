@@ -221,14 +221,15 @@ def _generate_reconstruction(
     stem: str,
     sample_dir: Path,
     device: torch.device,
-    seed: int,
+    base_seed: int,
+    num_images_per_prompt: int,
 ) -> tuple[list[object], list[Path]]:
     images = generate_from_embedding(
         pipeline,
         project_face_embs,
         embedding,
-        int(cfg["num_recon_per_image"]),
-        seed,
+        int(num_images_per_prompt),
+        base_seed,
         device,
         cfg,
     )
@@ -301,6 +302,7 @@ def _process_sample(
         sample_dir=sample_recon_dir,
         device=device,
         base_seed=base_seed + sample_index * 10 + 1,
+        num_images_per_prompt=num_images_per_prompt,
     )
     adapter_images, adapter_paths_out = _generate_reconstruction(
         cfg=cfg,
@@ -312,6 +314,7 @@ def _process_sample(
         sample_dir=sample_recon_dir,
         device=device,
         base_seed=base_seed + sample_index * 10,
+        num_images_per_prompt=num_images_per_prompt,
     )
     arcface_images, arc_paths = _generate_reconstruction(
         cfg=cfg,
@@ -323,6 +326,7 @@ def _process_sample(
         sample_dir=sample_recon_dir,
         device=device,
         base_seed=base_seed + sample_index * 10 + 2,
+        num_images_per_prompt=num_images_per_prompt,
     )
 
     comparison_path = None
@@ -475,6 +479,7 @@ def run_single_image_inference(
         sample_dir=adapter_dir,
         device=device,
         base_seed=base_seed,
+        num_images_per_prompt=n_images,
     )
     adaface_images, adaface_paths = _generate_reconstruction(
         cfg=cfg,
@@ -486,6 +491,7 @@ def run_single_image_inference(
         sample_dir=adaface_dir,
         device=device,
         base_seed=base_seed + 1,
+        num_images_per_prompt=n_images,
     )
     arcface_images, arc_paths = _generate_reconstruction(
         cfg=cfg,
@@ -497,6 +503,7 @@ def run_single_image_inference(
         sample_dir=arc_dir,
         device=device,
         base_seed=base_seed + 2,
+        num_images_per_prompt=n_images,
     )
 
     comparison_path = output_dir / f"{stem}_comparison.png"
