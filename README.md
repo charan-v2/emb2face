@@ -150,6 +150,65 @@ If you prefer shell commands after the notebook bootstrap has run, you can still
 !python -m emb2face attack --config config/default.yaml
 ```
 
+## Docker
+
+This repo includes a GPU-ready [`Dockerfile`](./Dockerfile).
+
+Build it from the repository root:
+
+```bash
+docker build -t emb2face:gpu .
+```
+
+Run inference on a machine with NVIDIA Container Toolkit enabled:
+
+```bash
+docker run --rm --gpus all \
+  -v "$PWD:/workspace/emb2face" \
+  -v "$HOME/.cache/huggingface:/cache/huggingface" \
+  -v "$HOME/.cache/torch:/cache/torch" \
+  -v "$HOME/.insightface:/root/.insightface" \
+  -w /workspace/emb2face \
+  emb2face:gpu \
+  python -m emb2face infer --config config/default.yaml --input-dir /workspace/emb2face/data/webface_112x112 --device cuda
+```
+
+For a single image, swap `--input-dir` for `--input-image`.
+
+If you want to use a saved adapter checkpoint, add:
+
+```bash
+--inference-adapter-checkpoint /workspace/emb2face/outputs/.../best_*.pt
+```
+
+### GPU PC Notes
+
+The GPU-PC handout says the machine is reachable only from the university network, usually through VPN, and that work is run inside Docker containers.
+
+For the OVGU GPU PC workflow:
+
+1. Connect to the university VPN if needed.
+2. SSH into `gensynth.cs.uni-magdeburg.de`.
+3. Launch the assigned container, for example with `sudo Username.docker` or `sudo Username.docker help`.
+4. Keep your repo and writable files under your mounted home directory. The handout says the host path is `/vol2/Username/` and the same directory appears inside the container as `Username/`.
+5. Use shared datasets from `/vol2/share` on the host or `/share` inside the container.
+
+If you place this repo inside your mounted home directory, you can run the same inference command with paths adjusted to the container mounts. A typical GPU-PC command looks like:
+
+```bash
+python -m emb2face infer \
+  --config config/default.yaml \
+  --input-dir /share/webface_112x112 \
+  --output-dir /vol1/Username/emb2face_outputs/inference \
+  --device cuda
+```
+
+The important path choices are:
+
+- `dataset_root` or `--input-dir` should point at the mounted dataset path.
+- `output_root` or `--output-dir` should point at a writable location under `/vol1/Username/`.
+- `insight_root` should be a writable cache directory if you want the InsightFace model files to persist between runs.
+
 ## Recommended Colab paths
 
 If you are using Google Drive:
