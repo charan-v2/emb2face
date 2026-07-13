@@ -24,5 +24,5 @@ fvcore
 iopath
 PyYAML
 omegaconf
-uniface[gpu] ; platform_system=="Linux"
-uniface[cpu] ; platform_system!="Linux"
+# uniface[gpu] ; platform_system=="Linux"
+# uniface[cpu] ; platform_system!="Linux"
