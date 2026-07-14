@@ -34,14 +34,14 @@ eval_images_per_identity: 5
 debug_eval_identities: 5
 debug_eval_images_per_identity: 2
 num_recon_per_image: 1
-num_inference_steps: 5
+num_inference_steps: 3
 guidance_scale: 3.0
 impostors_per_probe: 20
 adapter_run_mode: full
 inference_adapter_checkpoint: null
 inference_num_identities: 10
 inference_images_per_identity: 1
-save_comparison_figures: true
+save_comparison_figures: false
 inference_score_max_retries: 0
 score_detector_backend: retinaface
 score_embedder_backend: insightface
