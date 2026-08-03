@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 from pathlib import Path
 from .config import load_config
 
@@ -41,6 +42,10 @@ def _parse_args(argv=None):
 
 def main(argv=None):
     args = _parse_args(argv)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    )
     overrides = {
         "runmode": args.runmode,
         "dataset_root": args.dataset_root,

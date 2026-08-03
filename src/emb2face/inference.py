@@ -22,7 +22,7 @@ from tqdm.auto import tqdm
 from PIL import Image
 
 from .embeddings import load_adaface_model, load_arcface_app, setup_device, source_embeddings
-from .face_backends import estimate_face_yaw_degrees, select_largest_face
+from .face_backends import build_face_detector, estimate_face_yaw_degrees, select_largest_face
 from .models import LinearAdapter, MLPAdapter, ResidualMLPAdapter
 from .utils import l2_normalize
 
@@ -176,13 +176,13 @@ def collect_identity_images(input_dir: Path, exts: Iterable[str]) -> dict[str, l
     return mapping
 
 
-def _image_is_frontal(image_path: Path, arc_app, max_yaw_degrees: float, require_single_face: bool) -> dict[str, object] | None:
+def _image_is_frontal(image_path: Path, detector, max_yaw_degrees: float, require_single_face: bool) -> dict[str, object] | None:
     img_bgr = cv2.imread(str(image_path))
     if img_bgr is None:
         return None
 
     try:
-        faces = list(arc_app.get(img_bgr))
+        faces = list(detector.detect(img_bgr))
     except Exception:
         return None
 
@@ -264,7 +264,7 @@ def sample_image_rows_from_mapping(
     num_identities: int | None,
     images_per_identity: int,
     *,
-    arc_app,
+    detector,
     max_yaw_degrees: float,
     require_single_face: bool,
     seed: int | None,
@@ -288,16 +288,34 @@ def sample_image_rows_from_mapping(
         if not candidate_paths:
             continue
         candidate_paths = list(rng.permutation(candidate_paths))
+        LOGGER.info(
+            "[infer] sampling identity=%s (%d/%d candidates, need %d usable image(s))",
+            identity,
+            len(candidate_paths),
+            len(identity_images[identity]),
+            images_per_identity,
+        )
 
         accepted_paths: list[Path] = []
         for candidate_index, image_path in enumerate(candidate_paths):
+            LOGGER.info(
+                "[infer] checking candidate identity=%s candidate=%d/%d image=%s",
+                identity,
+                candidate_index + 1,
+                len(candidate_paths),
+                image_path.name,
+            )
             pose_row = _image_is_frontal(
                 image_path,
-                arc_app=arc_app,
+                detector=detector,
                 max_yaw_degrees=max_yaw_degrees,
                 require_single_face=require_single_face,
             )
             if pose_row is None:
+                LOGGER.info(
+                    "[infer] rejected image=%s reason=pose_or_face_filter",
+                    image_path.name,
+                )
                 manifest_rows.append(
                     {
                         "identity": identity,
@@ -312,6 +330,11 @@ def sample_image_rows_from_mapping(
                 )
                 continue
 
+            LOGGER.info(
+                "[infer] accepted image=%s yaw=%.2f",
+                image_path.name,
+                float(pose_row["yaw_degrees"]),
+            )
             manifest_rows.append(
                 {
                     "identity": identity,
@@ -327,6 +350,12 @@ def sample_image_rows_from_mapping(
                 break
 
         if len(accepted_paths) < images_per_identity:
+            LOGGER.info(
+                "[infer] identity=%s skipped because only %d/%d usable image(s) were found",
+                identity,
+                len(accepted_paths),
+                images_per_identity,
+            )
             continue
 
         for image_order, image_path in enumerate(accepted_paths[:images_per_identity]):
@@ -337,8 +366,15 @@ def sample_image_rows_from_mapping(
                     "image_order": image_order,
                     "image_path": image_path,
                 }
-            )
+        )
         selected_identity_count += 1
+        LOGGER.info(
+            "[infer] locked identity=%s with %d usable image(s) (%d/%d identities complete)",
+            identity,
+            images_per_identity,
+            selected_identity_count,
+            target_identities,
+        )
 
     if selected_identity_count < target_identities:
         raise ValueError(
@@ -358,7 +394,7 @@ def sample_image_rows(
     num_identities: int | None,
     images_per_identity: int,
     *,
-    arc_app,
+    detector,
     max_yaw_degrees: float,
     require_single_face: bool,
     seed: int | None,
@@ -368,7 +404,7 @@ def sample_image_rows(
         identity_images,
         num_identities,
         images_per_identity,
-        arc_app=arc_app,
+        detector=detector,
         max_yaw_degrees=max_yaw_degrees,
         require_single_face=require_single_face,
         seed=seed,
@@ -668,10 +704,14 @@ def run_single_image_inference(
     seed: int | None = None,
 ):
     device = _load_device(cfg)
+    LOGGER.info("[infer] loading adapters")
     adapters = load_adapters(cfg, device)
+    LOGGER.info("[infer] loaded %d adapter(s): %s", len(adapters), ", ".join(item.name for item in adapters))
+    LOGGER.info("[infer] loading face models and Arc2Face pipeline")
     arc_app, _ = load_arcface_app(cfg)
     ada_model = load_adaface_model(cfg, device)
     pipeline, project_face_embs = load_arc2face_pipeline(cfg, device)
+    LOGGER.info("[infer] models ready")
 
     input_image = Path(input_image)
     if not input_image.exists() or not input_image.is_file():
@@ -812,10 +852,18 @@ def run_inference_pipeline(
     seed: int | None = None,
 ):
     device = _load_device(cfg)
+    LOGGER.info("[infer] loading adapters")
     adapters = load_adapters(cfg, device)
+    LOGGER.info("[infer] loaded %d adapter(s): %s", len(adapters), ", ".join(item.name for item in adapters))
+    pose_detector_cfg = dict(cfg)
+    pose_detector_cfg["score_detector_backend"] = cfg.get("inference_pose_detector_backend", "retinaface")
+    LOGGER.info("[infer] loading pose detector backend=%s", pose_detector_cfg["score_detector_backend"])
+    pose_detector = build_face_detector(pose_detector_cfg)
+    LOGGER.info("[infer] loading face models and Arc2Face pipeline")
     arc_app, _ = load_arcface_app(cfg)
     ada_model = load_adaface_model(cfg, device)
     pipeline, project_face_embs = load_arc2face_pipeline(cfg, device)
+    LOGGER.info("[infer] models ready")
 
     input_dir = Path(input_dir)
     base_output_dir = Path(output_dir) if output_dir is not None else cfg["output_root"] / f"inference_{cfg['runmode'].lower()}"
@@ -836,13 +884,18 @@ def run_inference_pipeline(
         cfg["image_extensions"],
         selected_num_identities,
         selected_images_per_identity,
-        arc_app=arc_app,
+        detector=pose_detector,
         max_yaw_degrees=cfg["inference_max_yaw_degrees"],
         require_single_face=cfg["inference_pose_require_single_face"],
         seed=base_seed,
     )
     if not rows:
         raise ValueError(f"No images found under {input_dir} after pose filtering")
+    LOGGER.info(
+        "[infer] sampled %d image(s) across %d identity(ies) after pose filtering",
+        len(rows),
+        len({row["identity"] for row in rows}),
+    )
 
     selected_df = pd.DataFrame(rows)
     if not selected_df.empty:
@@ -858,6 +911,13 @@ def run_inference_pipeline(
     figures_dir = output_dir / "figures" if selected_save_figures else None
     result_rows = []
     for idx, row in enumerate(tqdm(rows, desc="Inference")):
+        LOGGER.info(
+            "[infer] processing identity=%s image=%s (%d/%d)",
+            row.get("identity"),
+            Path(row["image_path"]).name,
+            idx + 1,
+            len(rows),
+        )
         row_result = _process_sample(
             cfg=cfg,
             sample=row,
