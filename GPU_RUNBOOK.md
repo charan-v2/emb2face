@@ -134,8 +134,6 @@ If you want to run both adapters in the same inference pass, use:
 inference_adapter_checkpoints:
   - /vol2/pitsec_sose26_topic9/sharedDockerDir/emb2face/outputs/webface_arcada_adapter/models_full/best_linear_adapter.pt
   - /vol2/pitsec_sose26_topic9/sharedDockerDir/emb2face/outputs/webface_arcada_adapter/models_full/best_residual_mlp_adapter.pt
-inference_max_yaw_degrees: 45
-inference_pose_require_single_face: true
 ```
 
 ## 8. Run inference
@@ -170,12 +168,10 @@ python -m emb2face infer \
   --inference-adapter-checkpoints /vol2/pitsec_sose26_topic9/sharedDockerDir/emb2face/outputs/webface_arcada_adapter/models_full/best_linear_adapter.pt,/vol2/pitsec_sose26_topic9/sharedDockerDir/emb2face/outputs/webface_arcada_adapter/models_full/best_residual_mlp_adapter.pt \
   --num-identities 2000 \
   --images-per-identity 5 \
-  --inference-max-yaw-degrees 45 \
-  --inference-pose-require-single-face \
   --device cuda
 ```
 
-The run writes a pose-filter manifest alongside the normal inference outputs, and the scoring command stays the same because it already picks up any `*_recon_path` / `*_recon_paths` columns in the inference report.
+Inference sampling is plain random selection now; the run no longer does a separate pose-filter prepass. The scoring command stays the same because it already picks up any `*_recon_path` / `*_recon_paths` columns in the inference report.
 
 If you keep the GPU defaults in `config/default.yaml`, the shortest form is:
 

@@ -12,7 +12,6 @@ from types import MethodType
 from pathlib import Path
 from typing import Iterable, Sequence
 
-import cv2
 import numpy as np
 import pandas as pd
 import torch
@@ -22,7 +21,6 @@ from tqdm.auto import tqdm
 from PIL import Image
 
 from .embeddings import load_adaface_model, load_arcface_app, setup_device, source_embeddings
-from .face_backends import build_face_detector, estimate_face_yaw_degrees, select_largest_face
 from .models import LinearAdapter, MLPAdapter, ResidualMLPAdapter
 from .utils import l2_normalize
 
@@ -176,99 +174,12 @@ def collect_identity_images(input_dir: Path, exts: Iterable[str]) -> dict[str, l
     return mapping
 
 
-def _image_is_frontal(image_path: Path, detector, max_yaw_degrees: float, require_single_face: bool) -> dict[str, object] | None:
-    img_bgr = cv2.imread(str(image_path))
-    if img_bgr is None:
-        return None
-
-    try:
-        faces = list(detector.detect(img_bgr))
-    except Exception:
-        return None
-
-    if not faces:
-        return None
-    if require_single_face and len(faces) != 1:
-        return None
-
-    face = select_largest_face(faces)
-    yaw = estimate_face_yaw_degrees(face, img_bgr.shape)
-    if yaw is None:
-        return None
-    if abs(yaw) > float(max_yaw_degrees):
-        return None
-
-    return {
-        "image_path": str(image_path),
-        "face_count": int(len(faces)),
-        "yaw_degrees": float(yaw),
-        "abs_yaw_degrees": float(abs(yaw)),
-    }
-
-
-def build_pose_filtered_manifest(
-    input_dir: Path,
-    exts: Iterable[str],
-    arc_app,
-    max_yaw_degrees: float,
-    require_single_face: bool,
-) -> tuple[dict[str, list[Path]], pd.DataFrame]:
-    identity_images = collect_identity_images(input_dir, exts)
-    filtered: dict[str, list[Path]] = {}
-    rows: list[dict[str, object]] = []
-
-    for identity, paths in tqdm(identity_images.items(), desc="Pose filtering"):
-        kept_paths: list[Path] = []
-        for image_path in paths:
-            pose_row = _image_is_frontal(
-                image_path,
-                arc_app=arc_app,
-                max_yaw_degrees=max_yaw_degrees,
-                require_single_face=require_single_face,
-            )
-            if pose_row is None:
-                rows.append(
-                    {
-                        "identity": identity,
-                        "image_path": str(image_path),
-                        "keep": False,
-                        "face_count": None,
-                        "yaw_degrees": None,
-                        "abs_yaw_degrees": None,
-                        "reason": "no_usable_face_or_yaw_exceeds_threshold",
-                    }
-                )
-                continue
-
-            rows.append(
-                {
-                    "identity": identity,
-                    **pose_row,
-                    "keep": True,
-                    "reason": "kept",
-                }
-            )
-            kept_paths.append(image_path)
-
-        if kept_paths:
-            filtered[identity] = kept_paths
-
-    manifest_df = pd.DataFrame(rows)
-    if not manifest_df.empty:
-        manifest_df["keep"] = manifest_df["keep"].astype(bool)
-    return filtered, manifest_df
-
-
 def sample_image_rows_from_mapping(
     identity_images: dict[str, list[Path]],
     num_identities: int | None,
     images_per_identity: int,
-    *,
-    detector,
-    max_yaw_degrees: float,
-    require_single_face: bool,
     seed: int | None,
-) -> tuple[list[dict], pd.DataFrame]:
+) -> list[dict]:
     if not identity_images:
         raise ValueError("No identity folders found after scanning the dataset")
 
@@ -277,7 +188,6 @@ def sample_image_rows_from_mapping(
     identity_order_pool = list(rng.permutation(sorted(identity_images.keys())))
 
     selected_rows: list[dict] = []
-    manifest_rows: list[dict[str, object]] = []
     selected_identity_count = 0
 
     for identity in identity_order_pool:
@@ -288,77 +198,21 @@ def sample_image_rows_from_mapping(
         if not candidate_paths:
             continue
         candidate_paths = list(rng.permutation(candidate_paths))
-        LOGGER.info(
-            "[infer] sampling identity=%s (%d/%d candidates, need %d usable image(s))",
-            identity,
-            len(candidate_paths),
-            len(identity_images[identity]),
-            images_per_identity,
-        )
-
-        accepted_paths: list[Path] = []
-        for candidate_index, image_path in enumerate(candidate_paths):
+        if len(candidate_paths) < images_per_identity:
             LOGGER.info(
-                "[infer] checking candidate identity=%s candidate=%d/%d image=%s",
+                "[infer] identity=%s skipped because only %d image(s) were available",
                 identity,
-                candidate_index + 1,
                 len(candidate_paths),
-                image_path.name,
-            )
-            pose_row = _image_is_frontal(
-                image_path,
-                detector=detector,
-                max_yaw_degrees=max_yaw_degrees,
-                require_single_face=require_single_face,
-            )
-            if pose_row is None:
-                LOGGER.info(
-                    "[infer] rejected image=%s reason=pose_or_face_filter",
-                    image_path.name,
-                )
-                manifest_rows.append(
-                    {
-                        "identity": identity,
-                        "image_path": str(image_path),
-                        "candidate_index": candidate_index,
-                        "keep": False,
-                        "face_count": None,
-                        "yaw_degrees": None,
-                        "abs_yaw_degrees": None,
-                        "reason": "rejected_by_pose_filter",
-                    }
-                )
-                continue
-
-            LOGGER.info(
-                "[infer] accepted image=%s yaw=%.2f",
-                image_path.name,
-                float(pose_row["yaw_degrees"]),
-            )
-            manifest_rows.append(
-                {
-                    "identity": identity,
-                    "image_path": str(image_path),
-                    "candidate_index": candidate_index,
-                    "keep": True,
-                    **pose_row,
-                    "reason": "kept",
-                }
-            )
-            accepted_paths.append(image_path)
-            if len(accepted_paths) >= images_per_identity:
-                break
-
-        if len(accepted_paths) < images_per_identity:
-            LOGGER.info(
-                "[infer] identity=%s skipped because only %d/%d usable image(s) were found",
-                identity,
-                len(accepted_paths),
-                images_per_identity,
             )
             continue
 
-        for image_order, image_path in enumerate(accepted_paths[:images_per_identity]):
+        selected_paths = candidate_paths[:images_per_identity]
+        LOGGER.info(
+            "[infer] sampled identity=%s with %d image(s)",
+            identity,
+            len(selected_paths),
+        )
+        for image_order, image_path in enumerate(selected_paths):
             selected_rows.append(
                 {
                     "identity": identity,
@@ -366,26 +220,16 @@ def sample_image_rows_from_mapping(
                     "image_order": image_order,
                     "image_path": image_path,
                 }
-        )
+            )
         selected_identity_count += 1
-        LOGGER.info(
-            "[infer] locked identity=%s with %d usable image(s) (%d/%d identities complete)",
-            identity,
-            images_per_identity,
-            selected_identity_count,
-            target_identities,
-        )
 
     if selected_identity_count < target_identities:
         raise ValueError(
-            f"Could only find {selected_identity_count} identities with at least {images_per_identity} usable images "
-            f"out of {target_identities} requested. Try relaxing the pose threshold or using a larger dataset."
+            f"Could only find {selected_identity_count} identities with at least {images_per_identity} image(s) "
+            f"out of {target_identities} requested."
         )
 
-    manifest_df = pd.DataFrame(manifest_rows)
-    if not manifest_df.empty:
-        manifest_df["keep"] = manifest_df["keep"].astype(bool)
-    return selected_rows, manifest_df
+    return selected_rows
 
 
 def sample_image_rows(
@@ -393,22 +237,10 @@ def sample_image_rows(
     exts: Iterable[str],
     num_identities: int | None,
     images_per_identity: int,
-    *,
-    detector,
-    max_yaw_degrees: float,
-    require_single_face: bool,
     seed: int | None,
-) -> tuple[list[dict], pd.DataFrame]:
+) -> list[dict]:
     identity_images = collect_identity_images(input_dir, exts)
-    return sample_image_rows_from_mapping(
-        identity_images,
-        num_identities,
-        images_per_identity,
-        detector=detector,
-        max_yaw_degrees=max_yaw_degrees,
-        require_single_face=require_single_face,
-        seed=seed,
-    )
+    return sample_image_rows_from_mapping(identity_images, num_identities, images_per_identity, seed)
 
 
 def _load_device(cfg: dict) -> torch.device:
@@ -637,10 +469,6 @@ def build_summary(
     save_comparison_figures: bool,
     *,
     selected_identity_count: int,
-    pose_manifest_rows: int,
-    pose_kept_rows: int,
-    max_yaw_degrees: float,
-    require_single_face: bool,
     adapter_count: int,
 ):
     ok = result_df[result_df["status"] == "ok"].copy()
@@ -652,11 +480,6 @@ def build_summary(
         "selected_identities": int(selected_identity_count),
         "images_per_identity": images_per_identity,
         "save_comparison_figures": save_comparison_figures,
-        "pose_manifest_rows": int(pose_manifest_rows),
-        "pose_kept_rows": int(pose_kept_rows),
-        "pose_rejected_rows": int(max(pose_manifest_rows - pose_kept_rows, 0)),
-        "pose_max_yaw_degrees": float(max_yaw_degrees),
-        "pose_require_single_face": bool(require_single_face),
         "adapter_count": int(adapter_count),
         "num_generated_images": float(ok["num_generated_images"].mean()) if len(ok) else float("nan"),
     }
@@ -855,10 +678,6 @@ def run_inference_pipeline(
     LOGGER.info("[infer] loading adapters")
     adapters = load_adapters(cfg, device)
     LOGGER.info("[infer] loaded %d adapter(s): %s", len(adapters), ", ".join(item.name for item in adapters))
-    pose_detector_cfg = dict(cfg)
-    pose_detector_cfg["score_detector_backend"] = cfg.get("inference_pose_detector_backend", "retinaface")
-    LOGGER.info("[infer] loading pose detector backend=%s", pose_detector_cfg["score_detector_backend"])
-    pose_detector = build_face_detector(pose_detector_cfg)
     LOGGER.info("[infer] loading face models and Arc2Face pipeline")
     arc_app, _ = load_arcface_app(cfg)
     ada_model = load_adaface_model(cfg, device)
@@ -879,33 +698,18 @@ def run_inference_pipeline(
     if base_seed is None:
         base_seed = _random_seed()
 
-    rows, pose_manifest_df = sample_image_rows(
+    rows = sample_image_rows(
         input_dir,
         cfg["image_extensions"],
         selected_num_identities,
         selected_images_per_identity,
-        detector=pose_detector,
-        max_yaw_degrees=cfg["inference_max_yaw_degrees"],
-        require_single_face=cfg["inference_pose_require_single_face"],
         seed=base_seed,
     )
     if not rows:
-        raise ValueError(f"No images found under {input_dir} after pose filtering")
-    LOGGER.info(
-        "[infer] sampled %d image(s) across %d identity(ies) after pose filtering",
-        len(rows),
-        len({row["identity"] for row in rows}),
-    )
+        raise ValueError(f"No images found under {input_dir}")
 
     selected_df = pd.DataFrame(rows)
-    if not selected_df.empty:
-        kept_meta = pose_manifest_df[pose_manifest_df["keep"]].copy()
-        kept_meta["image_path"] = kept_meta["image_path"].astype(str)
-        selected_df["image_path"] = selected_df["image_path"].astype(str)
-        selected_df = selected_df.merge(kept_meta.drop(columns=["keep"]), on=["identity", "image_path"], how="left")
     selected_df["run_id"] = run_id
-    pose_manifest_df["run_id"] = run_id
-    pose_manifest_df.to_csv(output_dir / "pose_filter_report.csv", index=False)
     selected_df.to_csv(output_dir / "selected_samples.csv", index=False)
 
     figures_dir = output_dir / "figures" if selected_save_figures else None
@@ -945,10 +749,6 @@ def run_inference_pipeline(
         selected_images_per_identity,
         selected_save_figures,
         selected_identity_count=int(selected_df["identity"].nunique()) if not selected_df.empty else 0,
-        pose_manifest_rows=int(len(pose_manifest_df)),
-        pose_kept_rows=int(pose_manifest_df["keep"].sum()) if not pose_manifest_df.empty else 0,
-        max_yaw_degrees=float(cfg["inference_max_yaw_degrees"]),
-        require_single_face=bool(cfg["inference_pose_require_single_face"]),
         adapter_count=len(adapters),
     )
     summary_df["run_id"] = run_id

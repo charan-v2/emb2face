@@ -44,11 +44,8 @@ inference_adapter_checkpoints:
   - "outputs/webface_arcada_adapter/models_full/best_residual_mlp_adapter.pt"
 inference_input_dir: "data/webface_112x112"
 inference_output_dir: "outputs/webface_arcada_adapter/inference_full"
-inference_pose_detector_backend: retinaface
 inference_num_identities: 2000
 inference_images_per_identity: 5
-inference_max_yaw_degrees: 45
-inference_pose_require_single_face: true
 save_comparison_figures: true
 inference_score_max_retries: 0
 score_detector_backend: retinaface

@@ -85,13 +85,9 @@ To sample a presentation set, pick identities first and then images per identity
 python -m emb2face infer --config config/default.yaml --input-dir /path/to/dataset_root --num-identities 10 --images-per-identity 1 --save-comparison-figures
 ```
 
-The folder sampler now writes a pose-filter manifest first and keeps only images with estimated yaw within the configured threshold. By default, images with more than 45 degrees of estimated yaw are skipped, and identities with fewer than the requested number of usable images are omitted. You can tune that behavior with:
+Inference sampling is now plain random selection. The run will still extract faces for embedding and reconstruction, but it no longer does a separate yaw-based prefilter step.
 
-- `inference_max_yaw_degrees`: pose cutoff in degrees
-- `inference_pose_require_single_face`: whether to reject multi-face images before sampling
-- `inference_adapter_checkpoints`: one or more adapter checkpoints to run in the same pass
-
-If you fill those values in `config/default.yaml`, you can run the whole inference stage with just:
+If you fill the input/output/checkpoint values in `config/default.yaml`, you can run the whole inference stage with just:
 
 ```bash
 python -m emb2face infer --config config/default.yaml
@@ -113,8 +109,6 @@ python -m emb2face infer \
   --num-identities 2000 \
   --images-per-identity 5 \
   --inference-adapter-checkpoints /path/to/best_linear_adapter.pt,/path/to/best_residual_mlp_adapter.pt \
-  --inference-max-yaw-degrees 45 \
-  --inference-pose-require-single-face \
   --device cuda
 ```
 
@@ -153,8 +147,6 @@ If you want inference to use a specific adapter checkpoint, set `inference_adapt
 inference_adapter_checkpoints:
   - outputs/webface_arcada_adapter/models_full/best_linear_adapter.pt
   - outputs/webface_arcada_adapter/models_full/best_residual_mlp_adapter.pt
-inference_max_yaw_degrees: 45
-inference_pose_require_single_face: true
 ```
 
 8. Or do both in one go.
