@@ -91,6 +91,18 @@ The folder sampler now writes a pose-filter manifest first and keeps only images
 - `inference_pose_require_single_face`: whether to reject multi-face images before sampling
 - `inference_adapter_checkpoints`: one or more adapter checkpoints to run in the same pass
 
+If you fill those values in `config/default.yaml`, you can run the whole inference stage with just:
+
+```bash
+python -m emb2face infer --config config/default.yaml
+```
+
+And then score the latest inference run with:
+
+```bash
+python -m emb2face score --config config/default.yaml
+```
+
 For the GPU workflow you described, a good starting command is:
 
 ```bash

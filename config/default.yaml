@@ -1,7 +1,7 @@
 runmode: FULL
 dataset_root: "data/webface_112x112"
 output_root: "outputs/webface_arcada_adapter"
-device: "auto"
+device: "cuda"
 adapter_type: "mlp"  # "linear", "mlp", or "residual_mlp"
 seed: null
 det_size: [640, 640]
@@ -34,14 +34,21 @@ eval_images_per_identity: 5
 debug_eval_identities: 5
 debug_eval_images_per_identity: 2
 num_recon_per_image: 1
-num_inference_steps: 3
+num_inference_steps: 10
 guidance_scale: 3.0
 impostors_per_probe: 20
 adapter_run_mode: full
 inference_adapter_checkpoint: null
-inference_num_identities: 10
-inference_images_per_identity: 1
-save_comparison_figures: false
+inference_adapter_checkpoints:
+  - "outputs/webface_arcada_adapter/models_full/best_linear_adapter.pt"
+  - "outputs/webface_arcada_adapter/models_full/best_residual_mlp_adapter.pt"
+inference_input_dir: "data/webface_112x112"
+inference_output_dir: "outputs/webface_arcada_adapter/inference_full"
+inference_num_identities: 2000
+inference_images_per_identity: 5
+inference_max_yaw_degrees: 45
+inference_pose_require_single_face: true
+save_comparison_figures: true
 inference_score_max_retries: 0
 score_detector_backend: retinaface
 score_embedder_backend: insightface

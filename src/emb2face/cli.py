@@ -73,21 +73,25 @@ def main(argv=None):
     if args.command == "infer":
         from .inference import run_inference_pipeline, run_single_image_inference
 
-        if args.input_image and args.input_dir:
+        input_dir = Path(args.input_dir) if args.input_dir else cfg.get("inference_input_dir")
+        input_image = Path(args.input_image) if args.input_image else None
+        output_dir = Path(args.output_dir) if args.output_dir else cfg.get("inference_output_dir")
+
+        if input_image and input_dir:
             raise ValueError("Use only one of --input-image or --input-dir")
-        if args.input_image:
+        if input_image:
             run_single_image_inference(
                 cfg,
-                input_image=Path(args.input_image),
-                output_dir=Path(args.output_dir) if args.output_dir else None,
+                input_image=input_image,
+                output_dir=output_dir,
                 num_images_per_prompt=args.num_images_per_prompt,
                 seed=args.seed,
             )
-        elif args.input_dir:
+        elif input_dir:
             run_inference_pipeline(
                 cfg,
-                input_dir=Path(args.input_dir),
-                output_dir=Path(args.output_dir) if args.output_dir else None,
+                input_dir=Path(input_dir),
+                output_dir=output_dir,
                 num_identities=args.num_identities,
                 images_per_identity=args.images_per_identity,
                 num_images_per_prompt=args.num_images_per_prompt,
@@ -95,18 +99,17 @@ def main(argv=None):
                 seed=args.seed,
             )
         else:
-            raise ValueError("Provide either --input-image or --input-dir for infer")
+            raise ValueError("Provide either --input-image or --input-dir, or set inference_input_dir in the config")
     if args.command == "score":
         from .score_run import run_score_pipeline
 
-        if not args.input_run_dir:
-            raise ValueError("Provide --input-run-dir for score")
+        input_run_dir = Path(args.input_run_dir) if args.input_run_dir else cfg.get("score_input_run_dir")
         selected_methods = None
         if args.score_methods:
             selected_methods = [x.strip() for x in args.score_methods.split(",") if x.strip()]
         result = run_score_pipeline(
             cfg,
-            input_run_dir=Path(args.input_run_dir),
+            input_run_dir=Path(input_run_dir) if input_run_dir else None,
             output_dir=Path(args.output_dir) if args.output_dir else None,
             selected_methods=selected_methods,
         )

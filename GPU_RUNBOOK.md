@@ -177,6 +177,13 @@ python -m emb2face infer \
 
 The run writes a pose-filter manifest alongside the normal inference outputs, and the scoring command stays the same because it already picks up any `*_recon_path` / `*_recon_paths` columns in the inference report.
 
+If you keep the GPU defaults in `config/default.yaml`, the shortest form is:
+
+```bash
+python -m emb2face infer --config config/default.yaml
+python -m emb2face score --config config/default.yaml
+```
+
 ## 9. Run scoring
 
 Score a previous inference run by pointing to the `run_*` folder created by inference:

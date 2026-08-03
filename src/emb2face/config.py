@@ -51,6 +51,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "adapter_run_mode": "full",
     "inference_adapter_checkpoint": None,
     "inference_adapter_checkpoints": None,
+    "inference_input_dir": None,
+    "inference_output_dir": None,
     "inference_num_identities": 10,
     "inference_images_per_identity": 1,
     "inference_max_yaw_degrees": 45.0,
@@ -77,6 +79,8 @@ def _coerce_paths(cfg: dict[str, Any]) -> dict[str, Any]:
         "arc2face_local_dir",
         "inference_adapter_checkpoint",
         "inference_adapter_checkpoints",
+        "inference_input_dir",
+        "inference_output_dir",
     ):
         if key in cfg and cfg[key] is not None:
             value = cfg[key]

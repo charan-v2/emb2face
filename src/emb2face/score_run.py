@@ -216,12 +216,35 @@ def _save_det_plot(det_curve_df: pd.DataFrame, output_path: Path):
     plt.close(fig)
 
 
+def _find_latest_run_dir(base_dir: Path) -> Path | None:
+    if not base_dir.exists() or not base_dir.is_dir():
+        return None
+    run_dirs = [p for p in base_dir.iterdir() if p.is_dir() and p.name.startswith("run_")]
+    if not run_dirs:
+        return None
+    return max(run_dirs, key=lambda p: p.stat().st_mtime)
+
+
 def run_score_pipeline(
     cfg: dict,
-    input_run_dir: Path,
+    input_run_dir: Path | None,
     output_dir: Path | None = None,
     selected_methods: list[str] | None = None,
 ):
+    if input_run_dir is None:
+        configured = cfg.get("score_input_run_dir")
+        if configured is not None:
+            input_run_dir = Path(configured)
+        else:
+            base_dir = cfg.get("inference_output_dir")
+            if base_dir is None:
+                base_dir = cfg["output_root"] / f"inference_{cfg['runmode'].lower()}"
+            input_run_dir = _find_latest_run_dir(Path(base_dir))
+            if input_run_dir is None:
+                raise FileNotFoundError(
+                    "Could not infer a score input run directory. Set score_input_run_dir in the config or pass --input-run-dir."
+                )
+
     input_run_dir = Path(input_run_dir)
     report_path = input_run_dir / "inference_report.csv"
     if not report_path.exists():
