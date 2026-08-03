@@ -263,40 +263,93 @@ def sample_image_rows_from_mapping(
     identity_images: dict[str, list[Path]],
     num_identities: int | None,
     images_per_identity: int,
+    *,
+    arc_app,
+    max_yaw_degrees: float,
+    require_single_face: bool,
     seed: int | None,
-) -> list[dict]:
-    eligible_identities = sorted([identity for identity, paths in identity_images.items() if len(paths) >= images_per_identity])
-    if not eligible_identities:
-        raise ValueError(
-            f"No identities have at least {images_per_identity} pose-filtered images available"
-        )
+) -> tuple[list[dict], pd.DataFrame]:
+    if not identity_images:
+        raise ValueError("No identity folders found after scanning the dataset")
 
+    target_identities = len(identity_images) if num_identities is None else min(num_identities, len(identity_images))
     rng = np.random.default_rng(seed)
-    if num_identities is None or num_identities >= len(eligible_identities):
-        selected_identities = list(rng.permutation(eligible_identities))
-    else:
-        selected_identities = list(rng.choice(eligible_identities, size=num_identities, replace=False))
+    identity_order_pool = list(rng.permutation(sorted(identity_images.keys())))
 
-    rows = []
-    for identity_order, identity in enumerate(selected_identities):
-        paths = identity_images[identity]
-        if len(paths) < images_per_identity:
+    selected_rows: list[dict] = []
+    manifest_rows: list[dict[str, object]] = []
+    selected_identity_count = 0
+
+    for identity in identity_order_pool:
+        if selected_identity_count >= target_identities:
+            break
+
+        candidate_paths = list(identity_images[identity])
+        if not candidate_paths:
             continue
-        if len(paths) == images_per_identity:
-            selected_paths = list(paths)
-        else:
-            selected_paths = [paths[i] for i in rng.choice(len(paths), size=images_per_identity, replace=False)]
-        for image_order, image_path in enumerate(selected_paths):
-            rows.append(
+        candidate_paths = list(rng.permutation(candidate_paths))
+
+        accepted_paths: list[Path] = []
+        for candidate_index, image_path in enumerate(candidate_paths):
+            pose_row = _image_is_frontal(
+                image_path,
+                arc_app=arc_app,
+                max_yaw_degrees=max_yaw_degrees,
+                require_single_face=require_single_face,
+            )
+            if pose_row is None:
+                manifest_rows.append(
+                    {
+                        "identity": identity,
+                        "image_path": str(image_path),
+                        "candidate_index": candidate_index,
+                        "keep": False,
+                        "face_count": None,
+                        "yaw_degrees": None,
+                        "abs_yaw_degrees": None,
+                        "reason": "rejected_by_pose_filter",
+                    }
+                )
+                continue
+
+            manifest_rows.append(
                 {
                     "identity": identity,
-                    "identity_order": identity_order,
+                    "image_path": str(image_path),
+                    "candidate_index": candidate_index,
+                    "keep": True,
+                    **pose_row,
+                    "reason": "kept",
+                }
+            )
+            accepted_paths.append(image_path)
+            if len(accepted_paths) >= images_per_identity:
+                break
+
+        if len(accepted_paths) < images_per_identity:
+            continue
+
+        for image_order, image_path in enumerate(accepted_paths[:images_per_identity]):
+            selected_rows.append(
+                {
+                    "identity": identity,
+                    "identity_order": selected_identity_count,
                     "image_order": image_order,
                     "image_path": image_path,
                 }
             )
+        selected_identity_count += 1
 
-    return rows
+    if selected_identity_count < target_identities:
+        raise ValueError(
+            f"Could only find {selected_identity_count} identities with at least {images_per_identity} usable images "
+            f"out of {target_identities} requested. Try relaxing the pose threshold or using a larger dataset."
+        )
+
+    manifest_df = pd.DataFrame(manifest_rows)
+    if not manifest_df.empty:
+        manifest_df["keep"] = manifest_df["keep"].astype(bool)
+    return selected_rows, manifest_df
 
 
 def sample_image_rows(
@@ -310,15 +363,16 @@ def sample_image_rows(
     require_single_face: bool,
     seed: int | None,
 ) -> tuple[list[dict], pd.DataFrame]:
-    filtered_mapping, manifest_df = build_pose_filtered_manifest(
-        input_dir,
-        exts,
+    identity_images = collect_identity_images(input_dir, exts)
+    return sample_image_rows_from_mapping(
+        identity_images,
+        num_identities,
+        images_per_identity,
         arc_app=arc_app,
         max_yaw_degrees=max_yaw_degrees,
         require_single_face=require_single_face,
+        seed=seed,
     )
-    rows = sample_image_rows_from_mapping(filtered_mapping, num_identities, images_per_identity, seed)
-    return rows, manifest_df
 
 
 def _load_device(cfg: dict) -> torch.device:
