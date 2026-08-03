@@ -50,8 +50,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "impostors_per_probe": 20,
     "adapter_run_mode": "full",
     "inference_adapter_checkpoint": None,
+    "inference_adapter_checkpoints": None,
     "inference_num_identities": 10,
     "inference_images_per_identity": 1,
+    "inference_max_yaw_degrees": 45.0,
+    "inference_pose_require_single_face": True,
     "save_comparison_figures": True,
     "inference_score_max_retries": 3,
     "score_detector_backend": "retinaface",
@@ -73,9 +76,14 @@ def _coerce_paths(cfg: dict[str, Any]) -> dict[str, Any]:
         "insight_root",
         "arc2face_local_dir",
         "inference_adapter_checkpoint",
+        "inference_adapter_checkpoints",
     ):
         if key in cfg and cfg[key] is not None:
-            cfg[key] = Path(cfg[key]).expanduser()
+            value = cfg[key]
+            if isinstance(value, (list, tuple)):
+                cfg[key] = [Path(item).expanduser() for item in value]
+            else:
+                cfg[key] = Path(value).expanduser()
     return cfg
 
 

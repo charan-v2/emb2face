@@ -16,6 +16,7 @@ def _parse_args(argv=None):
     parser.add_argument("--eval-source", type=str, default=None)
     parser.add_argument("--adapter-run-mode", type=str, default=None)
     parser.add_argument("--inference-adapter-checkpoint", type=str, default=None)
+    parser.add_argument("--inference-adapter-checkpoints", type=str, default=None, help="Comma-separated adapter checkpoints")
     parser.add_argument("--experiments", type=str, default=None, help="Comma-separated experiment list")
     parser.add_argument("--input-dir", type=str, default=None, help="Input directory for inference")
     parser.add_argument("--input-image", type=str, default=None, help="Single image for inference")
@@ -24,6 +25,10 @@ def _parse_args(argv=None):
     parser.add_argument("--num-images-per-prompt", type=int, default=None)
     parser.add_argument("--num-identities", type=int, default=None)
     parser.add_argument("--images-per-identity", type=int, default=None)
+    parser.add_argument("--inference-max-yaw-degrees", type=float, default=None)
+    parser.add_argument("--inference-pose-require-single-face", dest="inference_pose_require_single_face", action="store_true")
+    parser.add_argument("--no-inference-pose-require-single-face", dest="inference_pose_require_single_face", action="store_false")
+    parser.set_defaults(inference_pose_require_single_face=None)
     parser.add_argument("--score-detector-backend", type=str, default=None)
     parser.add_argument("--score-embedder-backend", type=str, default=None)
     parser.add_argument("--score-methods", type=str, default=None, help="Comma-separated reconstruction methods to score")
@@ -44,10 +49,14 @@ def main(argv=None):
         "eval_source": args.eval_source,
         "adapter_run_mode": args.adapter_run_mode,
         "inference_adapter_checkpoint": args.inference_adapter_checkpoint,
+        "inference_max_yaw_degrees": args.inference_max_yaw_degrees,
+        "inference_pose_require_single_face": args.inference_pose_require_single_face,
         "score_detector_backend": args.score_detector_backend,
         "score_embedder_backend": args.score_embedder_backend,
         "seed": args.seed,
     }
+    if args.inference_adapter_checkpoints:
+        overrides["inference_adapter_checkpoints"] = [x.strip() for x in args.inference_adapter_checkpoints.split(",") if x.strip()]
     if args.experiments:
         overrides["experiments"] = [x.strip() for x in args.experiments.split(",") if x.strip()]
 

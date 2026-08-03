@@ -4,26 +4,37 @@ import json
 import logging
 import random
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 import subprocess
 import sys
 from types import MethodType
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
 
+import cv2
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn as nn
 from huggingface_hub import hf_hub_download
 from tqdm.auto import tqdm
 from PIL import Image
 
 from .embeddings import load_adaface_model, load_arcface_app, setup_device, source_embeddings
+from .face_backends import estimate_face_yaw_degrees, select_largest_face
 from .models import LinearAdapter, MLPAdapter, ResidualMLPAdapter
 from .utils import l2_normalize
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclass
+class LoadedAdapter:
+    name: str
+    path: Path
+    model: nn.Module
 
 
 def ensure_arc2face_repo(cfg: dict) -> Path:
@@ -77,19 +88,24 @@ def load_arc2face_pipeline(cfg: dict, device: torch.device):
     return pipeline, project_face_embs
 
 
-def load_best_adapter(cfg: dict, device: torch.device):
-    explicit_ckpt = cfg.get("inference_adapter_checkpoint")
-    if explicit_ckpt is not None:
-        ckpt_path = Path(explicit_ckpt)
-        if not ckpt_path.exists():
-            raise FileNotFoundError(f"Explicit adapter checkpoint not found: {ckpt_path}")
-    else:
-        model_dir = cfg["output_root"] / f"models_{cfg['adapter_run_mode']}"
-        candidates = sorted(model_dir.glob("best_*_adapter.pt"))
-        if not candidates:
-            raise FileNotFoundError(f"No adapter checkpoint found in {model_dir}")
-        ckpt_path = candidates[0]
+def _adapter_display_name(ckpt_path: Path, ckpt: dict | None = None) -> str:
+    if ckpt is not None:
+        acfg = ckpt.get("config", {})
+        atype = acfg.get("adapter_type")
+        if atype:
+            return str(atype)
 
+    stem = ckpt_path.stem
+    if stem.startswith("best_") and stem.endswith("_adapter"):
+        stem = stem[len("best_") : -len("_adapter")]
+    elif stem.startswith("best_"):
+        stem = stem[len("best_") :]
+    elif stem.endswith("_adapter"):
+        stem = stem[: -len("_adapter")]
+    return stem or "adapter"
+
+
+def _build_adapter_from_checkpoint(ckpt_path: Path, device: torch.device) -> LoadedAdapter:
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     acfg = ckpt.get("config", {})
     atype = acfg.get("adapter_type", "linear")
@@ -106,7 +122,38 @@ def load_best_adapter(cfg: dict, device: torch.device):
     adapter = adapter.to(device)
     adapter.load_state_dict(ckpt["state_dict"])
     adapter.eval()
-    return adapter, ckpt_path
+    return LoadedAdapter(name=_adapter_display_name(ckpt_path, ckpt), path=ckpt_path, model=adapter)
+
+
+def load_adapters(cfg: dict, device: torch.device) -> list[LoadedAdapter]:
+    explicit_multi = cfg.get("inference_adapter_checkpoints")
+    explicit_single = cfg.get("inference_adapter_checkpoint")
+
+    if explicit_multi is not None:
+        ckpt_paths = [Path(p) for p in explicit_multi]
+    elif explicit_single is not None:
+        ckpt_paths = [Path(explicit_single)]
+    else:
+        model_dir = cfg["output_root"] / f"models_{cfg['adapter_run_mode']}"
+        candidates = sorted(model_dir.glob("best_*_adapter.pt"))
+        if not candidates:
+            raise FileNotFoundError(f"No adapter checkpoint found in {model_dir}")
+        ckpt_paths = [candidates[0]]
+
+    adapters = [_build_adapter_from_checkpoint(path, device) for path in ckpt_paths]
+    seen: dict[str, int] = {}
+    for item in adapters:
+        base_name = item.name
+        count = seen.get(base_name, 0)
+        if count:
+            item.name = f"{base_name}_{count + 1}"
+        seen[base_name] = count + 1
+    return adapters
+
+
+def load_best_adapter(cfg: dict, device: torch.device):
+    adapter = load_adapters(cfg, device)[0]
+    return adapter.model, adapter.path
 
 
 def collect_identity_images(input_dir: Path, exts: Iterable[str]) -> dict[str, list[Path]]:
@@ -129,33 +176,116 @@ def collect_identity_images(input_dir: Path, exts: Iterable[str]) -> dict[str, l
     return mapping
 
 
-def sample_image_rows(
+def _image_is_frontal(image_path: Path, arc_app, max_yaw_degrees: float, require_single_face: bool) -> dict[str, object] | None:
+    img_bgr = cv2.imread(str(image_path))
+    if img_bgr is None:
+        return None
+
+    try:
+        faces = list(arc_app.get(img_bgr))
+    except Exception:
+        return None
+
+    if not faces:
+        return None
+    if require_single_face and len(faces) != 1:
+        return None
+
+    face = select_largest_face(faces)
+    yaw = estimate_face_yaw_degrees(face, img_bgr.shape)
+    if yaw is None:
+        return None
+    if abs(yaw) > float(max_yaw_degrees):
+        return None
+
+    return {
+        "image_path": str(image_path),
+        "face_count": int(len(faces)),
+        "yaw_degrees": float(yaw),
+        "abs_yaw_degrees": float(abs(yaw)),
+    }
+
+
+def build_pose_filtered_manifest(
     input_dir: Path,
     exts: Iterable[str],
+    arc_app,
+    max_yaw_degrees: float,
+    require_single_face: bool,
+) -> tuple[dict[str, list[Path]], pd.DataFrame]:
+    identity_images = collect_identity_images(input_dir, exts)
+    filtered: dict[str, list[Path]] = {}
+    rows: list[dict[str, object]] = []
+
+    for identity, paths in tqdm(identity_images.items(), desc="Pose filtering"):
+        kept_paths: list[Path] = []
+        for image_path in paths:
+            pose_row = _image_is_frontal(
+                image_path,
+                arc_app=arc_app,
+                max_yaw_degrees=max_yaw_degrees,
+                require_single_face=require_single_face,
+            )
+            if pose_row is None:
+                rows.append(
+                    {
+                        "identity": identity,
+                        "image_path": str(image_path),
+                        "keep": False,
+                        "face_count": None,
+                        "yaw_degrees": None,
+                        "abs_yaw_degrees": None,
+                        "reason": "no_usable_face_or_yaw_exceeds_threshold",
+                    }
+                )
+                continue
+
+            rows.append(
+                {
+                    "identity": identity,
+                    **pose_row,
+                    "keep": True,
+                    "reason": "kept",
+                }
+            )
+            kept_paths.append(image_path)
+
+        if kept_paths:
+            filtered[identity] = kept_paths
+
+    manifest_df = pd.DataFrame(rows)
+    if not manifest_df.empty:
+        manifest_df["keep"] = manifest_df["keep"].astype(bool)
+    return filtered, manifest_df
+
+
+def sample_image_rows_from_mapping(
+    identity_images: dict[str, list[Path]],
     num_identities: int | None,
     images_per_identity: int,
+    seed: int | None,
 ) -> list[dict]:
-    identity_images = collect_identity_images(input_dir, exts)
-    identities = sorted(identity_images.keys())
-    # Sampling is intentionally non-deterministic so the selected identities/images
-    # do not depend on the inference seed.
-    rng = np.random.default_rng()
+    eligible_identities = sorted([identity for identity, paths in identity_images.items() if len(paths) >= images_per_identity])
+    if not eligible_identities:
+        raise ValueError(
+            f"No identities have at least {images_per_identity} pose-filtered images available"
+        )
 
-    if num_identities is None or num_identities >= len(identities):
-        selected_identities = list(rng.permutation(identities))
+    rng = np.random.default_rng(seed)
+    if num_identities is None or num_identities >= len(eligible_identities):
+        selected_identities = list(rng.permutation(eligible_identities))
     else:
-        selected_identities = list(rng.choice(identities, size=num_identities, replace=False))
+        selected_identities = list(rng.choice(eligible_identities, size=num_identities, replace=False))
 
     rows = []
     for identity_order, identity in enumerate(selected_identities):
         paths = identity_images[identity]
-        take = min(images_per_identity, len(paths))
-        if take <= 0:
+        if len(paths) < images_per_identity:
             continue
-        if take == len(paths):
+        if len(paths) == images_per_identity:
             selected_paths = list(paths)
         else:
-            selected_paths = [paths[i] for i in rng.choice(len(paths), size=take, replace=False)]
+            selected_paths = [paths[i] for i in rng.choice(len(paths), size=images_per_identity, replace=False)]
         for image_order, image_path in enumerate(selected_paths):
             rows.append(
                 {
@@ -167,6 +297,28 @@ def sample_image_rows(
             )
 
     return rows
+
+
+def sample_image_rows(
+    input_dir: Path,
+    exts: Iterable[str],
+    num_identities: int | None,
+    images_per_identity: int,
+    *,
+    arc_app,
+    max_yaw_degrees: float,
+    require_single_face: bool,
+    seed: int | None,
+) -> tuple[list[dict], pd.DataFrame]:
+    filtered_mapping, manifest_df = build_pose_filtered_manifest(
+        input_dir,
+        exts,
+        arc_app=arc_app,
+        max_yaw_degrees=max_yaw_degrees,
+        require_single_face=require_single_face,
+    )
+    rows = sample_image_rows_from_mapping(filtered_mapping, num_identities, images_per_identity, seed)
+    return rows, manifest_df
 
 
 def _load_device(cfg: dict) -> torch.device:
@@ -241,12 +393,25 @@ def _generate_reconstruction(
     return images, paths
 
 
+def _pretty_method_name(method: str) -> str:
+    mapping = {
+        "adapter": "Adapter",
+        "linear": "Linear Adapter",
+        "mlp": "MLP Adapter",
+        "residual_mlp": "Residual MLP Adapter",
+        "adaface_native": "AdaFace Native",
+        "arcface_native": "ArcFace Native",
+    }
+    if method in mapping:
+        return mapping[method]
+    return method.replace("_", " ").title()
+
+
 def _process_sample(
     *,
     cfg: dict,
     sample: dict,
-    adapter,
-    adapter_path: Path,
+    adapters: Sequence[LoadedAdapter],
     arc_app,
     ada_model,
     pipeline,
@@ -278,19 +443,39 @@ def _process_sample(
     ada_input = torch.from_numpy(emb["adaface"]).float().unsqueeze(0).to(device)
     arc_input = torch.from_numpy(source_arc).float().unsqueeze(0).to(device)
 
-    with torch.no_grad():
-        adapter_pred = adapter(ada_input).cpu().numpy()[0].astype(np.float32)
-    adapter_pred = l2_normalize(adapter_pred).astype(np.float32)
+    stem = image_path.stem
+    identity = sample.get("identity", image_path.parent.name)
+    sample_recon_dir = recon_dir / identity / stem
+    sample_recon_dir.mkdir(parents=True, exist_ok=True)
+
+    adapter_images_by_name: dict[str, object] = {}
+    adapter_paths_by_name: dict[str, list[str]] = {}
+    adapter_paths_meta: dict[str, str] = {}
+    for adapter_index, adapter_item in enumerate(adapters):
+        with torch.no_grad():
+            adapter_pred = adapter_item.model(ada_input).cpu().numpy()[0].astype(np.float32)
+        adapter_pred = l2_normalize(adapter_pred).astype(np.float32)
+
+        adapter_images, adapter_paths = _generate_reconstruction(
+            cfg=cfg,
+            pipeline=pipeline,
+            project_face_embs=project_face_embs,
+            embedding=adapter_pred,
+            label=f"{adapter_item.name}_adapter",
+            stem=stem,
+            sample_dir=sample_recon_dir,
+            device=device,
+            base_seed=base_seed + sample_index * 1000 + 100 + adapter_index,
+            num_images_per_prompt=num_images_per_prompt,
+        )
+        adapter_images_by_name[adapter_item.name] = adapter_images
+        adapter_paths_by_name[adapter_item.name] = [str(p) for p in adapter_paths]
+        adapter_paths_meta[adapter_item.name] = str(adapter_item.path)
 
     arcface_pred = arc_input.cpu().numpy()[0].astype(np.float32)
     arcface_pred = l2_normalize(arcface_pred).astype(np.float32)
 
     adaface_pred = l2_normalize(source_ada.astype(np.float32)).astype(np.float32)
-
-    stem = image_path.stem
-    identity = sample.get("identity", image_path.parent.name)
-    sample_recon_dir = recon_dir / identity / stem
-    sample_recon_dir.mkdir(parents=True, exist_ok=True)
 
     adaface_images, adaface_paths = _generate_reconstruction(
         cfg=cfg,
@@ -301,19 +486,7 @@ def _process_sample(
         stem=stem,
         sample_dir=sample_recon_dir,
         device=device,
-        base_seed=base_seed + sample_index * 10 + 1,
-        num_images_per_prompt=num_images_per_prompt,
-    )
-    adapter_images, adapter_paths_out = _generate_reconstruction(
-        cfg=cfg,
-        pipeline=pipeline,
-        project_face_embs=project_face_embs,
-        embedding=adapter_pred,
-        label="adaface_adapter",
-        stem=stem,
-        sample_dir=sample_recon_dir,
-        device=device,
-        base_seed=base_seed + sample_index * 10,
+        base_seed=base_seed + sample_index * 1000 + 1,
         num_images_per_prompt=num_images_per_prompt,
     )
     arcface_images, arc_paths = _generate_reconstruction(
@@ -325,7 +498,7 @@ def _process_sample(
         stem=stem,
         sample_dir=sample_recon_dir,
         device=device,
-        base_seed=base_seed + sample_index * 10 + 2,
+        base_seed=base_seed + sample_index * 1000 + 2,
         num_images_per_prompt=num_images_per_prompt,
     )
 
@@ -334,16 +507,16 @@ def _process_sample(
         figures_dir.mkdir(parents=True, exist_ok=True)
         comparison_path = figures_dir / identity / f"{stem}_comparison.png"
         comparison_path.parent.mkdir(parents=True, exist_ok=True)
-        _save_single_image_figure(
+        _save_comparison_figure(
             input_path=image_path,
             source_rgb=source_rgb,
             adaface_image=adaface_images[0] if adaface_images else source_rgb,
-            adapter_image=adapter_images[0] if adapter_images else source_rgb,
+            adapter_images={name: images[0] if images else source_rgb for name, images in adapter_images_by_name.items()},
             arcface_image=arcface_images[0] if arcface_images else source_rgb,
             output_path=comparison_path,
         )
 
-    return {
+    result = {
         "identity": identity,
         "identity_order": sample.get("identity_order"),
         "image_order": sample.get("image_order"),
@@ -352,35 +525,59 @@ def _process_sample(
         "arcface_source_path": str(image_path),
         "adaface_native_recon_path": str(adaface_paths[0]) if adaface_paths else None,
         "adaface_native_recon_paths": json.dumps([str(p) for p in adaface_paths]),
-        "adapter_recon_path": str(adapter_paths_out[0]) if adapter_paths_out else None,
-        "adapter_recon_paths": json.dumps([str(p) for p in adapter_paths_out]),
         "arcface_recon_path": str(arc_paths[0]) if arc_paths else None,
         "arcface_recon_paths": json.dumps([str(p) for p in arc_paths]),
         "num_generated_images": int(len(adaface_images)),
         "comparison_path": str(comparison_path) if comparison_path else None,
-        "adapter_path": str(adapter_path),
+        "adapter_path": json.dumps(adapter_paths_meta) if len(adapter_paths_meta) > 1 else next(iter(adapter_paths_meta.values()), None),
+        "adapter_paths": json.dumps(adapter_paths_meta),
     }
+    for adapter_name, adapter_paths in adapter_paths_by_name.items():
+        result[f"{adapter_name}_recon_path"] = adapter_paths[0] if adapter_paths else None
+        result[f"{adapter_name}_recon_paths"] = json.dumps(adapter_paths)
+        result[f"{adapter_name}_adapter_path"] = adapter_paths_meta.get(adapter_name)
+
+    return result
 
 
-def build_summary(result_df: pd.DataFrame, requested_identities: int | None, images_per_identity: int, save_comparison_figures: bool):
+def build_summary(
+    result_df: pd.DataFrame,
+    requested_identities: int | None,
+    images_per_identity: int,
+    save_comparison_figures: bool,
+    *,
+    selected_identity_count: int,
+    pose_manifest_rows: int,
+    pose_kept_rows: int,
+    max_yaw_degrees: float,
+    require_single_face: bool,
+    adapter_count: int,
+):
     ok = result_df[result_df["status"] == "ok"].copy()
     summary = {
         "num_rows": int(len(result_df)),
         "num_ok": int(len(ok)),
         "num_failed": int((result_df["status"] != "ok").sum()),
         "requested_identities": requested_identities,
+        "selected_identities": int(selected_identity_count),
         "images_per_identity": images_per_identity,
         "save_comparison_figures": save_comparison_figures,
+        "pose_manifest_rows": int(pose_manifest_rows),
+        "pose_kept_rows": int(pose_kept_rows),
+        "pose_rejected_rows": int(max(pose_manifest_rows - pose_kept_rows, 0)),
+        "pose_max_yaw_degrees": float(max_yaw_degrees),
+        "pose_require_single_face": bool(require_single_face),
+        "adapter_count": int(adapter_count),
         "num_generated_images": float(ok["num_generated_images"].mean()) if len(ok) else float("nan"),
     }
     return pd.DataFrame([summary])
 
 
-def _save_single_image_figure(
+def _save_comparison_figure(
     input_path: Path,
     source_rgb: np.ndarray,
     adaface_image,
-    adapter_image,
+    adapter_images: dict[str, object],
     arcface_image,
     output_path: Path,
 ):
@@ -389,23 +586,19 @@ def _save_single_image_figure(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
+    panels = [("Input", source_rgb), ("AdaFace -> Arc2Face", adaface_image)]
+    for adapter_name, adapter_image in adapter_images.items():
+        panels.append((f"{_pretty_method_name(adapter_name)} -> Arc2Face", adapter_image))
+    panels.append(("ArcFace -> Arc2Face", arcface_image))
 
-    axes[0].imshow(source_rgb)
-    axes[0].set_title("Input")
-    axes[0].axis("off")
+    fig, axes = plt.subplots(1, len(panels), figsize=(5 * len(panels), 5))
+    if len(panels) == 1:
+        axes = [axes]
 
-    axes[1].imshow(adaface_image)
-    axes[1].set_title("AdaFace -> Arc2Face")
-    axes[1].axis("off")
-
-    axes[2].imshow(adapter_image)
-    axes[2].set_title("AdaFace -> ArcFace -> Arc2Face")
-    axes[2].axis("off")
-
-    axes[3].imshow(arcface_image)
-    axes[3].set_title("ArcFace -> Arc2Face")
-    axes[3].axis("off")
+    for axis, (title, image) in zip(axes, panels):
+        axis.imshow(image)
+        axis.set_title(title)
+        axis.axis("off")
 
     fig.suptitle(input_path.name)
     plt.tight_layout()
@@ -421,7 +614,7 @@ def run_single_image_inference(
     seed: int | None = None,
 ):
     device = _load_device(cfg)
-    adapter, adapter_path = load_best_adapter(cfg, device)
+    adapters = load_adapters(cfg, device)
     arc_app, _ = load_arcface_app(cfg)
     ada_model = load_adaface_model(cfg, device)
     pipeline, project_face_embs = load_arc2face_pipeline(cfg, device)
@@ -451,9 +644,37 @@ def run_single_image_inference(
     ada_input = torch.from_numpy(emb["adaface"]).float().unsqueeze(0).to(device)
     arc_input = torch.from_numpy(source_arc).float().unsqueeze(0).to(device)
 
-    with torch.no_grad():
-        adapter_pred = adapter(ada_input).cpu().numpy()[0].astype(np.float32)
-    adapter_pred = l2_normalize(adapter_pred).astype(np.float32)
+    stem = input_image.stem
+    adapter_dir = recon_dir / f"{stem}_adapters"
+    adaface_dir = recon_dir / f"{stem}_adaface_native"
+    arc_dir = recon_dir / f"{stem}_arcface_native"
+    adapter_dir.mkdir(parents=True, exist_ok=True)
+    adaface_dir.mkdir(parents=True, exist_ok=True)
+    arc_dir.mkdir(parents=True, exist_ok=True)
+
+    adapter_images_by_name: dict[str, object] = {}
+    adapter_paths_by_name: dict[str, list[str]] = {}
+    adapter_paths_meta: dict[str, str] = {}
+    for adapter_index, adapter_item in enumerate(adapters):
+        with torch.no_grad():
+            adapter_pred = adapter_item.model(ada_input).cpu().numpy()[0].astype(np.float32)
+        adapter_pred = l2_normalize(adapter_pred).astype(np.float32)
+
+        adapter_images, adapter_paths_out = _generate_reconstruction(
+            cfg=cfg,
+            pipeline=pipeline,
+            project_face_embs=project_face_embs,
+            embedding=adapter_pred,
+            label=f"{adapter_item.name}_adapter",
+            stem=stem,
+            sample_dir=adapter_dir,
+            device=device,
+            base_seed=base_seed + adapter_index,
+            num_images_per_prompt=n_images,
+        )
+        adapter_images_by_name[adapter_item.name] = adapter_images
+        adapter_paths_by_name[adapter_item.name] = [str(p) for p in adapter_paths_out]
+        adapter_paths_meta[adapter_item.name] = str(adapter_item.path)
 
     arcface_pred = arc_input.cpu().numpy()[0].astype(np.float32)
     arcface_pred = l2_normalize(arcface_pred).astype(np.float32)
@@ -461,26 +682,6 @@ def run_single_image_inference(
     adaface_pred = source_ada.astype(np.float32)
     adaface_pred = l2_normalize(adaface_pred).astype(np.float32)
 
-    stem = input_image.stem
-    adapter_dir = recon_dir / f"{stem}_adaface_adapter"
-    adaface_dir = recon_dir / f"{stem}_adaface_native"
-    arc_dir = recon_dir / f"{stem}_arcface_native"
-    adapter_dir.mkdir(parents=True, exist_ok=True)
-    adaface_dir.mkdir(parents=True, exist_ok=True)
-    arc_dir.mkdir(parents=True, exist_ok=True)
-
-    adapter_images, adapter_paths_out = _generate_reconstruction(
-        cfg=cfg,
-        pipeline=pipeline,
-        project_face_embs=project_face_embs,
-        embedding=adapter_pred,
-        label="adaface_adapter",
-        stem=stem,
-        sample_dir=adapter_dir,
-        device=device,
-        base_seed=base_seed,
-        num_images_per_prompt=n_images,
-    )
     adaface_images, adaface_paths = _generate_reconstruction(
         cfg=cfg,
         pipeline=pipeline,
@@ -507,11 +708,11 @@ def run_single_image_inference(
     )
 
     comparison_path = output_dir / f"{stem}_comparison.png"
-    _save_single_image_figure(
+    _save_comparison_figure(
         input_path=input_image,
         source_rgb=source_rgb,
         adaface_image=adaface_images[0] if adaface_images else source_rgb,
-        adapter_image=adapter_images[0] if adapter_images else source_rgb,
+        adapter_images={name: images[0] if images else source_rgb for name, images in adapter_images_by_name.items()},
         arcface_image=arcface_images[0] if arcface_images else source_rgb,
         output_path=comparison_path,
     )
@@ -522,23 +723,26 @@ def run_single_image_inference(
                 "image_path": str(input_image),
                 "status": "ok",
                 "run_id": run_id,
-                "adapter_path": str(adapter_path),
+                "adapter_path": json.dumps(adapter_paths_meta) if len(adapter_paths_meta) > 1 else next(iter(adapter_paths_meta.values()), None),
+                "adapter_paths": json.dumps(adapter_paths_meta),
                 "comparison_path": str(comparison_path),
                 "adaface_native_recon_path": str(adaface_paths[0]) if adaface_paths else None,
                 "adaface_native_recon_paths": json.dumps([str(p) for p in adaface_paths]),
-                "adapter_recon_path": str(adapter_paths_out[0]) if adapter_paths_out else None,
-                "adapter_recon_paths": json.dumps([str(p) for p in adapter_paths_out]),
                 "arcface_recon_path": str(arc_paths[0]) if arc_paths else None,
                 "arcface_recon_paths": json.dumps([str(p) for p in arc_paths]),
                 "num_generated_images": int(len(adaface_images)),
             }
         ]
     )
+    for adapter_name, adapter_paths in adapter_paths_by_name.items():
+        result.loc[0, f"{adapter_name}_recon_path"] = adapter_paths[0] if adapter_paths else None
+        result.loc[0, f"{adapter_name}_recon_paths"] = json.dumps(adapter_paths)
+        result.loc[0, f"{adapter_name}_adapter_path"] = adapter_paths_meta.get(adapter_name)
     result.to_csv(output_dir / "single_image_inference.csv", index=False)
     return {
         "output_dir": output_dir,
         "comparison_path": comparison_path,
-        "adapter_path": adapter_path,
+        "adapter_paths": adapter_paths_meta,
         "results": result,
     }
 
@@ -554,7 +758,7 @@ def run_inference_pipeline(
     seed: int | None = None,
 ):
     device = _load_device(cfg)
-    adapter, adapter_path = load_best_adapter(cfg, device)
+    adapters = load_adapters(cfg, device)
     arc_app, _ = load_arcface_app(cfg)
     ada_model = load_adaface_model(cfg, device)
     pipeline, project_face_embs = load_arc2face_pipeline(cfg, device)
@@ -573,17 +777,28 @@ def run_inference_pipeline(
     if base_seed is None:
         base_seed = _random_seed()
 
-    rows = sample_image_rows(
+    rows, pose_manifest_df = sample_image_rows(
         input_dir,
         cfg["image_extensions"],
         selected_num_identities,
         selected_images_per_identity,
+        arc_app=arc_app,
+        max_yaw_degrees=cfg["inference_max_yaw_degrees"],
+        require_single_face=cfg["inference_pose_require_single_face"],
+        seed=base_seed,
     )
     if not rows:
-        raise ValueError(f"No images found under {input_dir}")
+        raise ValueError(f"No images found under {input_dir} after pose filtering")
 
     selected_df = pd.DataFrame(rows)
+    if not selected_df.empty:
+        kept_meta = pose_manifest_df[pose_manifest_df["keep"]].copy()
+        kept_meta["image_path"] = kept_meta["image_path"].astype(str)
+        selected_df["image_path"] = selected_df["image_path"].astype(str)
+        selected_df = selected_df.merge(kept_meta.drop(columns=["keep"]), on=["identity", "image_path"], how="left")
     selected_df["run_id"] = run_id
+    pose_manifest_df["run_id"] = run_id
+    pose_manifest_df.to_csv(output_dir / "pose_filter_report.csv", index=False)
     selected_df.to_csv(output_dir / "selected_samples.csv", index=False)
 
     figures_dir = output_dir / "figures" if selected_save_figures else None
@@ -592,8 +807,7 @@ def run_inference_pipeline(
         row_result = _process_sample(
             cfg=cfg,
             sample=row,
-            adapter=adapter,
-            adapter_path=adapter_path,
+            adapters=adapters,
             arc_app=arc_app,
             ada_model=ada_model,
             pipeline=pipeline,
@@ -611,14 +825,25 @@ def run_inference_pipeline(
     result_df = pd.DataFrame(result_rows)
     result_df["run_id"] = run_id
     result_df.to_csv(output_dir / "inference_report.csv", index=False)
-    summary_df = build_summary(result_df, selected_num_identities, selected_images_per_identity, selected_save_figures)
+    summary_df = build_summary(
+        result_df,
+        selected_num_identities,
+        selected_images_per_identity,
+        selected_save_figures,
+        selected_identity_count=int(selected_df["identity"].nunique()) if not selected_df.empty else 0,
+        pose_manifest_rows=int(len(pose_manifest_df)),
+        pose_kept_rows=int(pose_manifest_df["keep"].sum()) if not pose_manifest_df.empty else 0,
+        max_yaw_degrees=float(cfg["inference_max_yaw_degrees"]),
+        require_single_face=bool(cfg["inference_pose_require_single_face"]),
+        adapter_count=len(adapters),
+    )
     summary_df["run_id"] = run_id
     summary_df.to_csv(output_dir / "summary.csv", index=False)
     return {
         "output_dir": output_dir,
         "run_id": run_id,
         "recon_dir": recon_dir,
-        "adapter_path": adapter_path,
+        "adapter_paths": {item.name: str(item.path) for item in adapters},
         "results": result_df,
         "summary": summary_df,
     }

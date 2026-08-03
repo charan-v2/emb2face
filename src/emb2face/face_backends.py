@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +53,10 @@ def _face_landmarks(face: Any) -> np.ndarray | None:
     return None
 
 
+def face_landmarks(face: Any) -> np.ndarray | None:
+    return _face_landmarks(face)
+
+
 def _face_area(face: Any) -> float:
     bbox = _face_bbox(face)
     if bbox is None:
@@ -73,6 +78,70 @@ def align_face_from_landmarks(img_bgr: np.ndarray, landmarks: np.ndarray | None,
     from insightface.utils import face_align
 
     return face_align.norm_crop(img_bgr, landmark=landmarks, image_size=image_size)
+
+
+def estimate_yaw_degrees(landmarks: np.ndarray | None, image_shape: tuple[int, int, int] | tuple[int, int]) -> float | None:
+    if landmarks is None:
+        return None
+
+    arr = np.asarray(landmarks, dtype=np.float32)
+    if arr.ndim != 2 or arr.shape[0] < 5 or arr.shape[1] < 2:
+        return None
+
+    image_points = arr[:5, :2].astype(np.float32)
+    model_points = np.array(
+        [
+            (-30.0, 30.0, 30.0),
+            (30.0, 30.0, 30.0),
+            (0.0, 0.0, 0.0),
+            (-25.0, -30.0, 30.0),
+            (25.0, -30.0, 30.0),
+        ],
+        dtype=np.float32,
+    )
+
+    height, width = image_shape[:2]
+    focal_length = float(max(width, height))
+    center = (width / 2.0, height / 2.0)
+    camera_matrix = np.array(
+        [
+            [focal_length, 0.0, center[0]],
+            [0.0, focal_length, center[1]],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    dist_coeffs = np.zeros((4, 1), dtype=np.float32)
+
+    try:
+        success, rvec, tvec = cv2.solvePnP(
+            model_points,
+            image_points,
+            camera_matrix,
+            dist_coeffs,
+            flags=cv2.SOLVEPNP_ITERATIVE,
+        )
+    except cv2.error:
+        return None
+
+    if not success:
+        return None
+
+    try:
+        rotation_mat, _ = cv2.Rodrigues(rvec)
+        pose_mat = cv2.hconcat((rotation_mat, tvec))
+        _, _, _, _, _, _, euler_angles = cv2.decomposeProjectionMatrix(pose_mat)
+    except cv2.error:
+        return None
+
+    yaw = float(euler_angles[1, 0])
+    if not math.isfinite(yaw):
+        return None
+    return yaw
+
+
+def estimate_face_yaw_degrees(face: Any, image_shape: tuple[int, int, int] | tuple[int, int]) -> float | None:
+    return estimate_yaw_degrees(face_landmarks(face), image_shape)
 
 
 @dataclass

@@ -85,6 +85,27 @@ To sample a presentation set, pick identities first and then images per identity
 python -m emb2face infer --config config/default.yaml --input-dir /path/to/dataset_root --num-identities 10 --images-per-identity 1 --save-comparison-figures
 ```
 
+The folder sampler now writes a pose-filter manifest first and keeps only images with estimated yaw within the configured threshold. By default, images with more than 45 degrees of estimated yaw are skipped, and identities with fewer than the requested number of usable images are omitted. You can tune that behavior with:
+
+- `inference_max_yaw_degrees`: pose cutoff in degrees
+- `inference_pose_require_single_face`: whether to reject multi-face images before sampling
+- `inference_adapter_checkpoints`: one or more adapter checkpoints to run in the same pass
+
+For the GPU workflow you described, a good starting command is:
+
+```bash
+python -m emb2face infer \
+  --config config/default.yaml \
+  --input-dir /path/to/dataset_root \
+  --output-dir /path/to/inference_runs \
+  --num-identities 2000 \
+  --images-per-identity 5 \
+  --inference-adapter-checkpoints /path/to/best_linear_adapter.pt,/path/to/best_residual_mlp_adapter.pt \
+  --inference-max-yaw-degrees 45 \
+  --inference-pose-require-single-face \
+  --device cuda
+```
+
 This step only generates reconstructions and run metadata. Similarity and biometric metrics are computed later from the saved run folder.
 
 6. Run the scoring pipeline on a previous inference run folder.
@@ -114,10 +135,14 @@ The scoring step writes:
 python -m emb2face infer --config config/default.yaml --input-image /path/to/image.jpg
 ```
 
-If you want inference to use a specific adapter checkpoint, set `inference_adapter_checkpoint` in the config to the exact `.pt` file path. For example:
+If you want inference to use a specific adapter checkpoint, set `inference_adapter_checkpoint` in the config to the exact `.pt` file path. To run multiple adapters in one pass, use `inference_adapter_checkpoints` with a comma-separated list on the CLI or a list in the config. For example:
 
 ```yaml
-inference_adapter_checkpoint: outputs/webface_arcada_adapter/models_full/best_residual_mlp_adapter.pt
+inference_adapter_checkpoints:
+  - outputs/webface_arcada_adapter/models_full/best_linear_adapter.pt
+  - outputs/webface_arcada_adapter/models_full/best_residual_mlp_adapter.pt
+inference_max_yaw_degrees: 45
+inference_pose_require_single_face: true
 ```
 
 8. Or do both in one go.

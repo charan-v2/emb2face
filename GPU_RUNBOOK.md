@@ -128,6 +128,16 @@ If you already have a trained adapter checkpoint, set:
 inference_adapter_checkpoint: /vol2/pitsec_sose26_topic9/sharedDockerDir/emb2face/outputs/webface_arcada_adapter/models_full/best_residual_mlp_adapter.pt
 ```
 
+If you want to run both adapters in the same inference pass, use:
+
+```yaml
+inference_adapter_checkpoints:
+  - /vol2/pitsec_sose26_topic9/sharedDockerDir/emb2face/outputs/webface_arcada_adapter/models_full/best_linear_adapter.pt
+  - /vol2/pitsec_sose26_topic9/sharedDockerDir/emb2face/outputs/webface_arcada_adapter/models_full/best_residual_mlp_adapter.pt
+inference_max_yaw_degrees: 45
+inference_pose_require_single_face: true
+```
+
 ## 8. Run inference
 
 Folder inference:
@@ -157,9 +167,15 @@ python -m emb2face infer \
   --config config/default.yaml \
   --input-dir /vol2/pitsec_sose26_topic9/sharedDockerDir/emb2face/data/webface_112x112 \
   --output-dir /vol2/pitsec_sose26_topic9/sharedDockerDir/emb2face/outputs/webface_arcada_adapter/inference_full \
-  --inference-adapter-checkpoint /vol2/pitsec_sose26_topic9/sharedDockerDir/emb2face/outputs/webface_arcada_adapter/models_full/best_residual_mlp_adapter.pt \
+  --inference-adapter-checkpoints /vol2/pitsec_sose26_topic9/sharedDockerDir/emb2face/outputs/webface_arcada_adapter/models_full/best_linear_adapter.pt,/vol2/pitsec_sose26_topic9/sharedDockerDir/emb2face/outputs/webface_arcada_adapter/models_full/best_residual_mlp_adapter.pt \
+  --num-identities 2000 \
+  --images-per-identity 5 \
+  --inference-max-yaw-degrees 45 \
+  --inference-pose-require-single-face \
   --device cuda
 ```
+
+The run writes a pose-filter manifest alongside the normal inference outputs, and the scoring command stays the same because it already picks up any `*_recon_path` / `*_recon_paths` columns in the inference report.
 
 ## 9. Run scoring
 
