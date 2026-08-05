@@ -50,7 +50,7 @@ save_comparison_figures: true
 inference_score_max_retries: 0
 score_detector_backend: retinaface
 score_embedder_backend: insightface
-score_require_single_face: false
+score_require_single_face: true
 use_test_split_from_notebook1: true
 adaface_repo: "minchul/cvlface_adaface_ir50_ms1mv2"
 arc2face_repo: "FoivosPar/Arc2Face"
