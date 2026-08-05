@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from .utils import det_curve_points, verification_summary
 
 
 matplotlib.use("Agg")
+LOGGER = logging.getLogger(__name__)
 
 
 def _parse_path_list(value: Any) -> list[str]:
@@ -231,10 +233,12 @@ def run_score_pipeline(
     output_dir: Path | None = None,
     selected_methods: list[str] | None = None,
 ):
+    LOGGER.info("[score-1a2b] starting score pipeline")
     if input_run_dir is None:
         configured = cfg.get("score_input_run_dir")
         if configured is not None:
             input_run_dir = Path(configured)
+            LOGGER.info("[score-1a2b] using score_input_run_dir from config: %s", input_run_dir)
         else:
             base_dir = cfg.get("inference_output_dir")
             if base_dir is None:
@@ -244,37 +248,58 @@ def run_score_pipeline(
                 raise FileNotFoundError(
                     "Could not infer a score input run directory. Set score_input_run_dir in the config or pass --input-run-dir."
                 )
+            LOGGER.info("[score-1a2b] auto-selected latest inference run: %s", input_run_dir)
 
     input_run_dir = Path(input_run_dir)
     report_path = input_run_dir / "inference_report.csv"
     if not report_path.exists():
         raise FileNotFoundError(f"Inference report not found: {report_path}")
+    LOGGER.info("[score-1a2b] reading inference report: %s", report_path)
 
     report_df = pd.read_csv(report_path)
+    LOGGER.info("[score-1a2b] loaded %d report row(s) and %d column(s)", len(report_df), len(report_df.columns))
     long_rows = _explode_report_rows(report_df, selected_methods=selected_methods)
     if not long_rows:
         raise ValueError(f"No reconstruction path columns found in {report_path}")
+    LOGGER.info("[score-1a2b] expanded to %d reconstruction row(s)", len(long_rows))
 
     score_dir = Path(output_dir) if output_dir is not None else input_run_dir / "biometric_eval"
     score_dir.mkdir(parents=True, exist_ok=True)
+    LOGGER.info("[score-1a2b] writing outputs to %s", score_dir)
 
     detector_backend = cfg.get("score_detector_backend", "insightface")
     embedder_backend = cfg.get("score_embedder_backend", "insightface")
+    LOGGER.info(
+        "[score-1a2b] building detector=%s embedder=%s",
+        detector_backend,
+        embedder_backend,
+    )
     detector = build_face_detector(cfg)
     embedder = build_face_embedder(cfg)
     require_single_face = bool(cfg.get("score_require_single_face", cfg.get("require_single_face", False)))
+    LOGGER.info("[score-1a2b] require_single_face=%s", require_single_face)
 
     summary_rows: list[dict[str, Any]] = []
     pair_frames: list[pd.DataFrame] = []
     det_frames: list[pd.DataFrame] = []
     failed_frames: list[pd.DataFrame] = []
 
-    for method, method_rows in pd.DataFrame(long_rows).groupby("method"):
+    long_df = pd.DataFrame(long_rows)
+    LOGGER.info("[score-1a2b] scoring %d method(s): %s", long_df["method"].nunique(), ", ".join(sorted(long_df["method"].unique())))
+    for method, method_rows in long_df.groupby("method"):
+        LOGGER.info("[score-1a2b] scoring method=%s with %d row(s)", method, len(method_rows))
         valid_df, failed_df, pair_df = _score_method_rows(
             method_rows.to_dict("records"),
             detector=detector,
             embedder=embedder,
             require_single_face=require_single_face,
+        )
+        LOGGER.info(
+            "[score-1a2b] method=%s produced %d valid row(s), %d failed row(s), %d pair score(s)",
+            method,
+            len(valid_df),
+            len(failed_df),
+            len(pair_df),
         )
 
         if len(failed_df):
@@ -310,6 +335,7 @@ def run_score_pipeline(
         pair_df["method"] = method
         pair_frames.append(pair_df)
 
+        LOGGER.info("[score-1a2b] computing DET curve for method=%s", method)
         det = det_curve_points(pair_df["label"].to_numpy(), pair_df["score"].to_numpy())
         det_df = pd.DataFrame(det)
         det_df["method"] = method
@@ -328,20 +354,26 @@ def run_score_pipeline(
         )
 
     summary_df = pd.DataFrame(summary_rows)
+    LOGGER.info("[score-1a2b] concatenating outputs")
     pair_scores_df = pd.concat(pair_frames, ignore_index=True) if pair_frames else pd.DataFrame()
     det_curve_df = pd.concat(det_frames, ignore_index=True) if det_frames else pd.DataFrame()
     failed_df = pd.concat(failed_frames, ignore_index=True) if failed_frames else pd.DataFrame()
 
+    LOGGER.info("[score-1a2b] writing verification_eval.csv and summary.csv")
     summary_df.to_csv(score_dir / "verification_eval.csv", index=False)
     summary_df.to_csv(score_dir / "summary.csv", index=False)
     if not pair_scores_df.empty:
+        LOGGER.info("[score-1a2b] writing verification_scores.csv with %d row(s)", len(pair_scores_df))
         pair_scores_df.to_csv(score_dir / "verification_scores.csv", index=False)
     if not det_curve_df.empty:
+        LOGGER.info("[score-1a2b] writing det_curve.csv and det_curve.png with %d row(s)", len(det_curve_df))
         det_curve_df.to_csv(score_dir / "det_curve.csv", index=False)
         _save_det_plot(det_curve_df, score_dir / "det_curve.png")
     if not failed_df.empty:
+        LOGGER.info("[score-1a2b] writing failed_rows.csv with %d row(s)", len(failed_df))
         failed_df.to_csv(score_dir / "failed_rows.csv", index=False)
 
+    LOGGER.info("[score-1a2b] score pipeline complete")
     return {
         "output_dir": score_dir,
         "summary": summary_df,
