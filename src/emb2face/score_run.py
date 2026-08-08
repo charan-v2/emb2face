@@ -84,92 +84,281 @@ def _explode_report_rows(report_df: pd.DataFrame, selected_methods: list[str] | 
     return long_rows
 
 
-def _score_method_rows(
+def _extract_face_rows(
     rows: list[dict[str, Any]],
+    *,
+    path_key: str,
+    role: str,
     detector,
     embedder,
     require_single_face: bool,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    source_cache: dict[str, Any] = {}
-    recon_cache: dict[str, Any] = {}
-
+    cache: dict[str, Any],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     valid_rows: list[dict[str, Any]] = []
     failed_rows: list[dict[str, Any]] = []
 
-    for row in rows:
-        source_path = row["source_path"]
-        recon_path = row["recon_path"]
+    total = len(rows)
+    for row_index, row in enumerate(rows, start=1):
+        path = row.get(path_key)
+        if path is None:
+            failed_rows.append({**row, "role": role, "reason": f"{role}_path_missing"})
+            continue
 
-        if source_path not in source_cache:
-            source_face = extract_face_embedding(
-                source_path,
+        path_str = str(path)
+        if path_str not in cache:
+            cache[path_str] = extract_face_embedding(
+                path_str,
                 detector=detector,
                 embedder=embedder,
                 require_single_face=require_single_face,
             )
-            source_cache[source_path] = source_face
-        source_face = source_cache[source_path]
+        face = cache[path_str]
 
-        if recon_path not in recon_cache:
-            recon_face = extract_face_embedding(
-                recon_path,
-                detector=detector,
-                embedder=embedder,
-                require_single_face=require_single_face,
+        if face is None:
+            failed_rows.append({**row, "role": role, "reason": f"{role}_face_extraction_failed"})
+        else:
+            valid_rows.append(
+                {
+                    **row,
+                    f"{role}_embedding": face.embedding,
+                    f"{role}_face_count": face.face_count,
+                    f"{role}_confidence": face.confidence,
+                }
             )
-            recon_cache[recon_path] = recon_face
-        recon_face = recon_cache[recon_path]
 
-        if source_face is None:
-            failed_rows.append({**row, "role": "source", "reason": "source_face_extraction_failed"})
-            continue
-        if recon_face is None:
-            failed_rows.append({**row, "role": "reconstruction", "reason": "reconstruction_face_extraction_failed"})
+        if total and (row_index == total or row_index % 500 == 0):
+            LOGGER.info("[score-1a2b] extracted %s embeddings %d/%d", role, row_index, total)
+
+    valid_df = pd.DataFrame(valid_rows)
+    failed_df = pd.DataFrame(failed_rows)
+    return valid_df, failed_df
+
+
+def _build_source_lookup(source_valid_df: pd.DataFrame) -> tuple[dict[int, int], dict[str, list[int]]]:
+    source_pos_by_row_index: dict[int, int] = {}
+    same_identity_rows: dict[str, list[int]] = {}
+    for pos, row in source_valid_df.reset_index(drop=True).iterrows():
+        row_index = int(row["source_row_index"])
+        identity = str(row["identity"])
+        source_pos_by_row_index[row_index] = int(pos)
+        same_identity_rows.setdefault(identity, []).append(row_index)
+    return source_pos_by_row_index, same_identity_rows
+
+
+def _sample_impostor_source_rows(
+    source_valid_df: pd.DataFrame,
+    max_impostors_per_reconstruction: int | None,
+    seed: int | None,
+) -> dict[int, list[int]]:
+    source_rows = source_valid_df.reset_index(drop=True)
+    source_row_indices = source_rows["source_row_index"].astype(int).tolist()
+    source_identities = source_rows["identity"].astype(str).tolist()
+    rng = np.random.default_rng(0 if seed is None else int(seed))
+
+    impostors_by_source_row: dict[int, list[int]] = {}
+    for pos, source_row_index in enumerate(source_row_indices):
+        source_identity = source_identities[pos]
+        candidates = [idx for idx, identity in zip(source_row_indices, source_identities) if identity != source_identity]
+        if not candidates:
+            impostors_by_source_row[source_row_index] = []
             continue
 
-        valid_rows.append(
+        if max_impostors_per_reconstruction is None or max_impostors_per_reconstruction <= 0:
+            chosen = candidates
+        elif len(candidates) <= max_impostors_per_reconstruction:
+            chosen = candidates
+        else:
+            chosen = rng.choice(candidates, size=max_impostors_per_reconstruction, replace=False).tolist()
+        impostors_by_source_row[source_row_index] = sorted(int(idx) for idx in chosen)
+
+    return impostors_by_source_row
+
+
+def _build_type_i_pairs(
+    valid_recon_df: pd.DataFrame,
+    source_valid_df: pd.DataFrame,
+    source_pos_by_row_index: dict[int, int],
+    impostors_by_source_row: dict[int, list[int]],
+) -> pd.DataFrame:
+    if valid_recon_df.empty or source_valid_df.empty:
+        return pd.DataFrame()
+
+    source_rows = source_valid_df.reset_index(drop=True)
+    source_embs = np.stack(source_rows["source_embedding"].to_list()).astype(np.float32)
+    source_emb_by_row_index = {
+        int(row["source_row_index"]): source_embs[pos]
+        for pos, row in source_rows.iterrows()
+    }
+    source_identity_by_row_index = {
+        int(row["source_row_index"]): str(row["identity"])
+        for _, row in source_rows.iterrows()
+    }
+    source_path_by_row_index = {
+        int(row["source_row_index"]): str(row["source_path"])
+        for _, row in source_rows.iterrows()
+    }
+
+    pair_rows: list[dict[str, Any]] = []
+    for _, recon_row in valid_recon_df.iterrows():
+        recon_source_row_index = int(recon_row["source_row_index"])
+        source_pos = source_pos_by_row_index.get(recon_source_row_index)
+        if source_pos is None:
+            continue
+
+        recon_emb = np.asarray(recon_row["recon_embedding"], dtype=np.float32)
+        exact_source_emb = source_embs[source_pos]
+        pair_rows.append(
             {
-                **row,
-                "source_embedding": source_face.embedding,
-                "recon_embedding": recon_face.embedding,
-                "source_face_count": source_face.face_count,
-                "recon_face_count": recon_face.face_count,
-                "source_confidence": source_face.confidence,
-                "recon_confidence": recon_face.confidence,
+                "source_row_index": recon_source_row_index,
+                "recon_row_index": int(recon_row["recon_row_index"]),
+                "source_identity": source_identity_by_row_index[recon_source_row_index],
+                "recon_identity": str(recon_row["identity"]),
+                "source_path": source_path_by_row_index[recon_source_row_index],
+                "recon_path": str(recon_row["recon_path"]),
+                "label": 1,
+                "score": float(recon_emb @ exact_source_emb),
+                "comparison_type": "type_i_genuine",
             }
         )
 
-    if not valid_rows:
-        return (
-            pd.DataFrame(valid_rows),
-            pd.DataFrame(failed_rows),
-            pd.DataFrame(),
-        )
+        for impostor_source_row_index in impostors_by_source_row.get(recon_source_row_index, []):
+            impostor_pos = source_pos_by_row_index.get(impostor_source_row_index)
+            if impostor_pos is None:
+                continue
+            pair_rows.append(
+                {
+                    "source_row_index": impostor_source_row_index,
+                    "recon_row_index": int(recon_row["recon_row_index"]),
+                    "source_identity": source_identity_by_row_index[impostor_source_row_index],
+                    "recon_identity": str(recon_row["identity"]),
+                    "source_path": source_path_by_row_index[impostor_source_row_index],
+                    "recon_path": str(recon_row["recon_path"]),
+                    "label": 0,
+                    "score": float(recon_emb @ source_emb_by_row_index[impostor_source_row_index]),
+                    "comparison_type": "type_i_impostor",
+                }
+            )
 
-    source_embs = np.stack([r["source_embedding"] for r in valid_rows]).astype(np.float32)
-    recon_embs = np.stack([r["recon_embedding"] for r in valid_rows]).astype(np.float32)
-    identities = np.asarray([r["identity"] for r in valid_rows])
+    return pd.DataFrame(pair_rows)
 
-    scores = source_embs @ recon_embs.T
-    labels = (identities[:, None] == identities[None, :]).astype(np.int32)
 
-    n = len(valid_rows)
-    pair_rows = pd.DataFrame(
-        {
-            "source_index": np.repeat(np.arange(n), n),
-            "recon_index": np.tile(np.arange(n), n),
-            "source_identity": np.repeat(identities, n),
-            "recon_identity": np.tile(identities, n),
-            "source_path": np.repeat([r["source_path"] for r in valid_rows], n),
-            "recon_path": np.tile([r["recon_path"] for r in valid_rows], n),
-            "label": labels.reshape(-1),
-            "score": scores.reshape(-1),
-        }
+def _build_type_ii_pairs(
+    valid_recon_df: pd.DataFrame,
+    source_valid_df: pd.DataFrame,
+    source_pos_by_row_index: dict[int, int],
+    same_identity_rows: dict[str, list[int]],
+    impostors_by_source_row: dict[int, list[int]],
+) -> pd.DataFrame:
+    if valid_recon_df.empty or source_valid_df.empty:
+        return pd.DataFrame()
+
+    source_rows = source_valid_df.reset_index(drop=True)
+    source_embs = np.stack(source_rows["source_embedding"].to_list()).astype(np.float32)
+    source_emb_by_row_index = {
+        int(row["source_row_index"]): source_embs[pos]
+        for pos, row in source_rows.iterrows()
+    }
+    source_identity_by_row_index = {
+        int(row["source_row_index"]): str(row["identity"])
+        for _, row in source_rows.iterrows()
+    }
+    source_path_by_row_index = {
+        int(row["source_row_index"]): str(row["source_path"])
+        for _, row in source_rows.iterrows()
+    }
+
+    pair_rows: list[dict[str, Any]] = []
+    for _, recon_row in valid_recon_df.iterrows():
+        recon_source_row_index = int(recon_row["source_row_index"])
+        source_pos = source_pos_by_row_index.get(recon_source_row_index)
+        if source_pos is None:
+            continue
+
+        recon_identity = str(recon_row["identity"])
+        recon_emb = np.asarray(recon_row["recon_embedding"], dtype=np.float32)
+
+        for genuine_source_row_index in same_identity_rows.get(recon_identity, []):
+            if genuine_source_row_index == recon_source_row_index:
+                continue
+            genuine_pos = source_pos_by_row_index.get(genuine_source_row_index)
+            if genuine_pos is None:
+                continue
+            pair_rows.append(
+                {
+                    "source_row_index": genuine_source_row_index,
+                    "recon_row_index": int(recon_row["recon_row_index"]),
+                    "source_identity": source_identity_by_row_index[genuine_source_row_index],
+                    "recon_identity": recon_identity,
+                    "source_path": source_path_by_row_index[genuine_source_row_index],
+                    "recon_path": str(recon_row["recon_path"]),
+                    "label": 1,
+                    "score": float(recon_emb @ source_emb_by_row_index[genuine_source_row_index]),
+                    "comparison_type": "type_ii_genuine",
+                }
+            )
+
+        for impostor_source_row_index in impostors_by_source_row.get(recon_source_row_index, []):
+            impostor_pos = source_pos_by_row_index.get(impostor_source_row_index)
+            if impostor_pos is None:
+                continue
+            if source_identity_by_row_index[impostor_source_row_index] == recon_identity:
+                continue
+            pair_rows.append(
+                {
+                    "source_row_index": impostor_source_row_index,
+                    "recon_row_index": int(recon_row["recon_row_index"]),
+                    "source_identity": source_identity_by_row_index[impostor_source_row_index],
+                    "recon_identity": recon_identity,
+                    "source_path": source_path_by_row_index[impostor_source_row_index],
+                    "recon_path": str(recon_row["recon_path"]),
+                    "label": 0,
+                    "score": float(recon_emb @ source_emb_by_row_index[impostor_source_row_index]),
+                    "comparison_type": "type_ii_impostor",
+                }
+            )
+
+    return pd.DataFrame(pair_rows)
+
+
+def _score_method_rows(
+    rows: list[dict[str, Any]],
+    source_valid_df: pd.DataFrame,
+    source_pos_by_row_index: dict[int, int],
+    same_identity_rows: dict[str, list[int]],
+    impostors_by_source_row: dict[int, list[int]],
+    detector,
+    embedder,
+    require_single_face: bool,
+    face_cache: dict[str, Any],
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    valid_recon_df, failed_rows_df = _extract_face_rows(
+        rows,
+        path_key="recon_path",
+        role="reconstruction",
+        detector=detector,
+        embedder=embedder,
+        require_single_face=require_single_face,
+        cache=face_cache,
     )
 
-    valid_df = pd.DataFrame(valid_rows).drop(columns=["source_embedding", "recon_embedding"])
-    failed_df = pd.DataFrame(failed_rows)
-    return valid_df, failed_df, pair_rows
+    if valid_recon_df.empty:
+        return valid_recon_df, failed_rows_df, pd.DataFrame(), pd.DataFrame()
+
+    type_i_df = _build_type_i_pairs(
+        valid_recon_df,
+        source_valid_df,
+        source_pos_by_row_index,
+        impostors_by_source_row,
+    )
+    type_ii_df = _build_type_ii_pairs(
+        valid_recon_df,
+        source_valid_df,
+        source_pos_by_row_index,
+        same_identity_rows,
+        impostors_by_source_row,
+    )
+
+    return valid_recon_df, failed_rows_df, type_i_df, type_ii_df
 
 
 def _score_to_summary(
@@ -279,27 +468,77 @@ def run_score_pipeline(
     require_single_face = bool(cfg.get("score_require_single_face", cfg.get("require_single_face", False)))
     LOGGER.info("[score-1a2b] require_single_face=%s", require_single_face)
 
-    summary_rows: list[dict[str, Any]] = []
-    pair_frames: list[pd.DataFrame] = []
+    face_cache: dict[str, Any] = {}
+    source_rows = [
+        {
+            "source_row_index": int(source_row_index),
+            "identity": row.get("identity"),
+            "source_path": str(row.get("image_path")),
+        }
+        for source_row_index, row in report_df.reset_index(drop=True).iterrows()
+    ]
+    LOGGER.info("[score-1a2b] extracting source gallery embeddings for %d row(s)", len(source_rows))
+    source_valid_df, source_failed_df = _extract_face_rows(
+        source_rows,
+        path_key="source_path",
+        role="source",
+        detector=detector,
+        embedder=embedder,
+        require_single_face=require_single_face,
+        cache=face_cache,
+    )
+    LOGGER.info(
+        "[score-1a2b] source gallery produced %d valid row(s) and %d failed row(s)",
+        len(source_valid_df),
+        len(source_failed_df),
+    )
+    source_pos_by_row_index, same_identity_rows = _build_source_lookup(source_valid_df)
+    max_impostors_per_reconstruction = cfg.get("score_max_impostors_per_reconstruction")
+    if max_impostors_per_reconstruction is not None:
+        max_impostors_per_reconstruction = int(max_impostors_per_reconstruction)
+    impostor_sampling_seed = cfg.get("score_impostor_sampling_seed", cfg.get("seed"))
+    impostors_by_source_row = _sample_impostor_source_rows(
+        source_valid_df,
+        max_impostors_per_reconstruction=max_impostors_per_reconstruction,
+        seed=impostor_sampling_seed,
+    )
+    LOGGER.info(
+        "[score-1a2b] sampled up to %s impostor source row(s) per reconstruction using seed=%s",
+        "all" if not max_impostors_per_reconstruction or max_impostors_per_reconstruction <= 0 else max_impostors_per_reconstruction,
+        impostor_sampling_seed,
+    )
+
+    type_i_summary_rows: list[dict[str, Any]] = []
+    type_ii_summary_rows: list[dict[str, Any]] = []
+    type_i_frames: list[pd.DataFrame] = []
+    type_ii_frames: list[pd.DataFrame] = []
     det_frames: list[pd.DataFrame] = []
     failed_frames: list[pd.DataFrame] = []
+    if not source_failed_df.empty:
+        failed_frames.append(source_failed_df)
 
     long_df = pd.DataFrame(long_rows)
     LOGGER.info("[score-1a2b] scoring %d method(s): %s", long_df["method"].nunique(), ", ".join(sorted(long_df["method"].unique())))
     for method, method_rows in long_df.groupby("method"):
         LOGGER.info("[score-1a2b] scoring method=%s with %d row(s)", method, len(method_rows))
-        valid_df, failed_df, pair_df = _score_method_rows(
+        valid_df, failed_df, type_i_df, type_ii_df = _score_method_rows(
             method_rows.to_dict("records"),
+            source_valid_df=source_valid_df,
+            source_pos_by_row_index=source_pos_by_row_index,
+            same_identity_rows=same_identity_rows,
+            impostors_by_source_row=impostors_by_source_row,
             detector=detector,
             embedder=embedder,
             require_single_face=require_single_face,
+            face_cache=face_cache,
         )
         LOGGER.info(
-            "[score-1a2b] method=%s produced %d valid row(s), %d failed row(s), %d pair score(s)",
+            "[score-1a2b] method=%s produced %d valid reconstruction row(s), %d failed row(s), %d type-I pair(s), %d type-II pair(s)",
             method,
             len(valid_df),
             len(failed_df),
-            len(pair_df),
+            len(type_i_df),
+            len(type_ii_df),
         )
 
         if len(failed_df):
@@ -307,10 +546,71 @@ def run_score_pipeline(
             failed_df["method"] = method
             failed_frames.append(failed_df)
 
-        if pair_df.empty:
-            summary_rows.append(
+        if not type_i_df.empty:
+            type_i_df = type_i_df.copy()
+            type_i_df["method"] = method
+            type_i_frames.append(type_i_df)
+            LOGGER.info("[score-1a2b] computing DET curve for method=%s from %d type-I pair(s)", method, len(type_i_df))
+            det = det_curve_points(type_i_df["label"].to_numpy(), type_i_df["score"].to_numpy())
+            det_df = pd.DataFrame(det)
+            det_df["method"] = method
+            det_frames.append(det_df)
+            type_i_summary_rows.append(
                 {
                     "method": method,
+                    "comparison_type": "type_i",
+                    "num_valid_rows": int(len(valid_df)),
+                    "num_failed_rows": int(len(failed_df)),
+                    "num_pairs": int(len(type_i_df)),
+                    "mean_exact_score": float(type_i_df["score"].mean()),
+                    "min_exact_score": float(type_i_df["score"].min()),
+                    "max_exact_score": float(type_i_df["score"].max()),
+                    "detector_backend": detector_backend,
+                    "embedder_backend": embedder_backend,
+                    "require_single_face": require_single_face,
+                }
+            )
+        else:
+            type_i_summary_rows.append(
+                {
+                    "method": method,
+                    "comparison_type": "type_i",
+                    "num_valid_rows": int(len(valid_df)),
+                    "num_failed_rows": int(len(failed_df)),
+                    "num_pairs": 0,
+                    "mean_exact_score": float("nan"),
+                    "min_exact_score": float("nan"),
+                    "max_exact_score": float("nan"),
+                    "detector_backend": detector_backend,
+                    "embedder_backend": embedder_backend,
+                    "require_single_face": require_single_face,
+                }
+            )
+
+        if not type_ii_df.empty:
+            type_ii_df = type_ii_df.copy()
+            type_ii_df["method"] = method
+            type_ii_frames.append(type_ii_df)
+            type_ii_summary_rows.append(
+                {
+                    **_score_to_summary(
+                        method,
+                        type_ii_df,
+                        cfg,
+                        detector_backend,
+                        embedder_backend,
+                        num_valid_rows=len(valid_df),
+                        num_failed_rows=len(failed_df),
+                    ),
+                    "comparison_type": "type_ii",
+                }
+            )
+        else:
+            LOGGER.info("[score-1a2b] method=%s has no type-II pairs after filtering", method)
+            type_ii_summary_rows.append(
+                {
+                    "method": method,
+                    "comparison_type": "type_ii",
                     "num_valid_rows": int(len(valid_df)),
                     "num_failed_rows": int(len(failed_df)),
                     "num_pairs": 0,
@@ -329,42 +629,32 @@ def run_score_pipeline(
                     "require_single_face": require_single_face,
                 }
             )
-            continue
 
-        pair_df = pair_df.copy()
-        pair_df["method"] = method
-        pair_frames.append(pair_df)
-
-        LOGGER.info("[score-1a2b] computing DET curve for method=%s", method)
-        det = det_curve_points(pair_df["label"].to_numpy(), pair_df["score"].to_numpy())
-        det_df = pd.DataFrame(det)
-        det_df["method"] = method
-        det_frames.append(det_df)
-
-        summary_rows.append(
-            _score_to_summary(
-                method,
-                pair_df,
-                cfg,
-                detector_backend,
-                embedder_backend,
-                num_valid_rows=len(valid_df),
-                num_failed_rows=len(failed_df),
-            )
-        )
-
-    summary_df = pd.DataFrame(summary_rows)
+    type_i_summary_df = pd.DataFrame(type_i_summary_rows)
+    type_ii_summary_df = pd.DataFrame(type_ii_summary_rows)
+    summary_df = type_i_summary_df
     LOGGER.info("[score-1a2b] concatenating outputs")
-    pair_scores_df = pd.concat(pair_frames, ignore_index=True) if pair_frames else pd.DataFrame()
+    type_i_scores_df = pd.concat(type_i_frames, ignore_index=True) if type_i_frames else pd.DataFrame()
+    type_ii_scores_df = pd.concat(type_ii_frames, ignore_index=True) if type_ii_frames else pd.DataFrame()
     det_curve_df = pd.concat(det_frames, ignore_index=True) if det_frames else pd.DataFrame()
     failed_df = pd.concat(failed_frames, ignore_index=True) if failed_frames else pd.DataFrame()
 
     LOGGER.info("[score-1a2b] writing verification_eval.csv and summary.csv")
     summary_df.to_csv(score_dir / "verification_eval.csv", index=False)
     summary_df.to_csv(score_dir / "summary.csv", index=False)
-    if not pair_scores_df.empty:
-        LOGGER.info("[score-1a2b] writing verification_scores.csv with %d row(s)", len(pair_scores_df))
-        pair_scores_df.to_csv(score_dir / "verification_scores.csv", index=False)
+    if not type_i_summary_df.empty:
+        LOGGER.info("[score-1a2b] writing typeI_summary.csv with %d row(s)", len(type_i_summary_df))
+        type_i_summary_df.to_csv(score_dir / "typeI_summary.csv", index=False)
+    if not type_ii_summary_df.empty:
+        LOGGER.info("[score-1a2b] writing typeII_summary.csv with %d row(s)", len(type_ii_summary_df))
+        type_ii_summary_df.to_csv(score_dir / "typeII_summary.csv", index=False)
+    if not type_i_scores_df.empty:
+        LOGGER.info("[score-1a2b] writing verification_scores.csv and typeI_scores.csv with %d row(s)", len(type_i_scores_df))
+        type_i_scores_df.to_csv(score_dir / "verification_scores.csv", index=False)
+        type_i_scores_df.to_csv(score_dir / "typeI_scores.csv", index=False)
+    if not type_ii_scores_df.empty:
+        LOGGER.info("[score-1a2b] writing typeII_scores.csv with %d row(s)", len(type_ii_scores_df))
+        type_ii_scores_df.to_csv(score_dir / "typeII_scores.csv", index=False)
     if not det_curve_df.empty:
         LOGGER.info("[score-1a2b] writing det_curve.csv and det_curve.png with %d row(s)", len(det_curve_df))
         det_curve_df.to_csv(score_dir / "det_curve.csv", index=False)
@@ -377,7 +667,9 @@ def run_score_pipeline(
     return {
         "output_dir": score_dir,
         "summary": summary_df,
-        "scores": pair_scores_df,
+        "scores": type_i_scores_df,
+        "type_i_scores": type_i_scores_df,
+        "type_ii_scores": type_ii_scores_df,
         "det_curve": det_curve_df,
         "failed": failed_df,
     }

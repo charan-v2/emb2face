@@ -130,10 +130,14 @@ If you use the default scoring backend, install UniFace first with `pip install 
 
 The scoring step writes:
 
-- `verification_eval.csv`: FAR, FRR, FMR, FNMR, EER, and threshold summary per reconstruction method
-- `verification_scores.csv`: flattened pairwise verification scores
-- `det_curve.csv`: DET curve points
-- `det_curve.png`: quick visual check of the DET curve
+- `verification_eval.csv`: Type I FAR, FRR, FMR, FNMR, EER, and threshold summary per reconstruction method
+- `verification_scores.csv`: flattened Type I genuine/impostor score table
+- `typeII_summary.csv`: Type II summary per method
+- `typeII_scores.csv`: flattened Type II genuine/impostor score table
+- `det_curve.csv`: Type I DET curve points
+- `det_curve.png`: quick visual check of the Type I DET curve
+
+Type I uses the exact source image for each reconstruction plus a capped impostor sample. Type II compares each reconstruction against the other images of the same identity, excluding the source image, plus the same capped impostor sample.
 
 7. Run the Arc2Face inference pipeline on a single image and save the comparison panel.
 
@@ -263,10 +267,12 @@ The pipeline writes artifacts under `output_root`, grouped by run mode:
   - `inference_report.csv`: per-image reconstruction paths and metadata
   - `summary.csv`: aggregate sampling / generation stats for the sampled set
 - `inference_<runmode>/<run_id>/biometric_eval/`: biometric scores for a previous inference run
-  - `verification_eval.csv`: FAR, FRR, FMR, FNMR, EER, and threshold summary
-  - `verification_scores.csv`: pairwise score table
-  - `det_curve.csv`: DET curve data
-  - `det_curve.png`: DET curve plot
+  - `verification_eval.csv`: Type I FAR, FRR, FMR, FNMR, EER, and threshold summary
+  - `verification_scores.csv`: Type I pairwise score table
+  - `typeII_summary.csv`: Type II summary
+  - `typeII_scores.csv`: Type II pairwise score table
+  - `det_curve.csv`: Type I DET curve data
+  - `det_curve.png`: Type I DET curve plot
 
 ## Notes
 

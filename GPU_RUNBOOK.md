@@ -180,6 +180,15 @@ python -m emb2face infer --config config/default.yaml
 python -m emb2face score --config config/default.yaml
 ```
 
+The score defaults now include a cap on impostors per reconstruction so large runs do not explode combinatorially. You can tune these in `config/default.yaml`:
+
+```yaml
+score_max_impostors_per_reconstruction: 20
+score_impostor_sampling_seed: null
+```
+
+The same sampled impostor gallery is reused for both adapter methods, so linear and residual MLP are scored against the same negatives.
+
 ## 9. Run scoring
 
 Score a previous inference run by pointing to the `run_*` folder created by inference:
