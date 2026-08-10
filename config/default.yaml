@@ -52,7 +52,7 @@ score_detector_backend: retinaface
 score_embedder_backend: insightface
 score_require_single_face: true
 score_face_cache_save_every: 500
-score_max_impostors_per_reconstruction: 20
+score_max_impostors_per_reconstruction: 250
 score_impostor_sampling_seed: null
 use_test_split_from_notebook1: true
 adaface_repo: "minchul/cvlface_adaface_ir50_ms1mv2"
