@@ -60,6 +60,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "score_detector_backend": "retinaface",
     "score_embedder_backend": "uniface",
     "score_require_single_face": False,
+    "score_face_cache_save_every": 500,
     "use_test_split_from_notebook1": True,
     "adaface_repo": "minchul/cvlface_adaface_ir50_ms1mv2",
     "arc2face_repo": "FoivosPar/Arc2Face",

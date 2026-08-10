@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import pickle
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -150,8 +152,10 @@ def _load_face_cache(cache_path: Path) -> dict[str, CachedFaceEmbedding | None]:
 
 def _save_face_cache(cache_path: Path, cache: dict[str, CachedFaceEmbedding | None]) -> None:
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(cache_path, "wb") as f:
-        pickle.dump(cache, f, protocol=pickle.HIGHEST_PROTOCOL)
+    with tempfile.NamedTemporaryFile("wb", dir=str(cache_path.parent), delete=False) as tmp:
+        pickle.dump(cache, tmp, protocol=pickle.HIGHEST_PROTOCOL)
+        tmp_path = Path(tmp.name)
+    os.replace(tmp_path, cache_path)
 
 
 def _extract_face_rows(
@@ -163,6 +167,8 @@ def _extract_face_rows(
     embedder,
     require_single_face: bool,
     cache: dict[str, CachedFaceEmbedding | None],
+    cache_path: Path | None = None,
+    cache_save_every: int = 0,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     valid_rows: list[dict[str, Any]] = []
     failed_rows: list[dict[str, Any]] = []
@@ -185,6 +191,7 @@ def _extract_face_rows(
                 )
                 cache[path_str] = None if extracted_face is None else _cache_face_embedding(extracted_face)
             except ValueError as exc:
+                cache[path_str] = None
                 failed_rows.append(
                     {
                         **row,
@@ -207,6 +214,13 @@ def _extract_face_rows(
                     f"{role}_confidence": face.confidence,
                 }
             )
+
+        if (
+            cache_path is not None
+            and cache_save_every > 0
+            and (row_index % cache_save_every == 0 or row_index == total)
+        ):
+            _save_face_cache(cache_path, cache)
 
         if total and (row_index == total or row_index % 500 == 0):
             LOGGER.info("[score-1a2b] extracted %s embeddings %d/%d", role, row_index, total)
@@ -413,6 +427,7 @@ def _score_method_rows(
     require_single_face: bool,
     face_cache: dict[str, Any],
     cache_path: Path | None = None,
+    cache_save_every: int = 0,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     valid_recon_df, failed_rows_df = _extract_face_rows(
         rows,
@@ -422,9 +437,9 @@ def _score_method_rows(
         embedder=embedder,
         require_single_face=require_single_face,
         cache=face_cache,
+        cache_path=cache_path,
+        cache_save_every=cache_save_every,
     )
-    if cache_path is not None:
-        _save_face_cache(cache_path, face_cache)
 
     if valid_recon_df.empty:
         return valid_recon_df, failed_rows_df, pd.DataFrame(), pd.DataFrame()
@@ -544,6 +559,8 @@ def run_score_pipeline(
     face_cache = _load_face_cache(face_cache_path)
     if face_cache:
         LOGGER.info("[score-1a2b] loaded %d cached face embedding(s) from %s", len(face_cache), face_cache_path)
+    face_cache_save_every = int(cfg.get("score_face_cache_save_every", 500) or 0)
+    LOGGER.info("[score-1a2b] face cache checkpoint interval=%s", "disabled" if face_cache_save_every <= 0 else face_cache_save_every)
 
     detector_backend = cfg.get("score_detector_backend", "insightface")
     embedder_backend = cfg.get("score_embedder_backend", "insightface")
@@ -574,8 +591,9 @@ def run_score_pipeline(
         embedder=embedder,
         require_single_face=require_single_face,
         cache=face_cache,
+        cache_path=face_cache_path,
+        cache_save_every=face_cache_save_every,
     )
-    _save_face_cache(face_cache_path, face_cache)
     LOGGER.info(
         "[score-1a2b] source gallery produced %d valid row(s) and %d failed row(s)",
         len(source_valid_df),
@@ -621,6 +639,7 @@ def run_score_pipeline(
             require_single_face=require_single_face,
             face_cache=face_cache,
             cache_path=face_cache_path,
+            cache_save_every=face_cache_save_every,
         )
         LOGGER.info(
             "[score-1a2b] method=%s produced %d valid reconstruction row(s), %d failed row(s), %d type-I pair(s), %d type-II pair(s)",
