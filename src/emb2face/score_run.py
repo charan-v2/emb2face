@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import pickle
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +17,13 @@ from .utils import det_curve_points, verification_summary
 
 matplotlib.use("Agg")
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclass
+class CachedFaceEmbedding:
+    embedding: np.ndarray
+    face_count: int
+    confidence: float | None
 
 
 def _parse_path_list(value: Any) -> list[str]:
@@ -84,6 +93,67 @@ def _explode_report_rows(report_df: pd.DataFrame, selected_methods: list[str] | 
     return long_rows
 
 
+def _embedding_column_name(role: str) -> str:
+    if role == "reconstruction":
+        return "recon_embedding"
+    return f"{role}_embedding"
+
+
+def _cache_face_embedding(face: Any) -> CachedFaceEmbedding:
+    confidence = getattr(face, "confidence", None)
+    if confidence is None:
+        confidence = getattr(face, "det_score", None)
+    if confidence is not None:
+        confidence = float(confidence)
+    if confidence is not None and np.isnan(confidence):
+        confidence = None
+    return CachedFaceEmbedding(
+        embedding=np.asarray(face.embedding, dtype=np.float32).reshape(-1),
+        face_count=int(face.face_count),
+        confidence=confidence,
+    )
+
+
+def _load_face_cache(cache_path: Path) -> dict[str, CachedFaceEmbedding | None]:
+    if not cache_path.exists():
+        return {}
+    with open(cache_path, "rb") as f:
+        raw_cache = pickle.load(f)
+    cache: dict[str, CachedFaceEmbedding | None] = {}
+    for path_str, entry in raw_cache.items():
+        if entry is None:
+            cache[str(path_str)] = None
+            continue
+        if isinstance(entry, CachedFaceEmbedding):
+            cache[str(path_str)] = entry
+            continue
+        if hasattr(entry, "embedding") and hasattr(entry, "face_count"):
+            cache[str(path_str)] = CachedFaceEmbedding(
+                embedding=np.asarray(entry.embedding, dtype=np.float32).reshape(-1),
+                face_count=int(entry.face_count),
+                confidence=None if getattr(entry, "confidence", None) is None else float(entry.confidence),
+            )
+            continue
+        if isinstance(entry, dict) and "embedding" in entry and "face_count" in entry:
+            confidence = entry.get("confidence")
+            if confidence is not None:
+                confidence = float(confidence)
+            cache[str(path_str)] = CachedFaceEmbedding(
+                embedding=np.asarray(entry["embedding"], dtype=np.float32).reshape(-1),
+                face_count=int(entry["face_count"]),
+                confidence=confidence,
+            )
+            continue
+        cache[str(path_str)] = None
+    return cache
+
+
+def _save_face_cache(cache_path: Path, cache: dict[str, CachedFaceEmbedding | None]) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(cache_path, "wb") as f:
+        pickle.dump(cache, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+
 def _extract_face_rows(
     rows: list[dict[str, Any]],
     *,
@@ -92,7 +162,7 @@ def _extract_face_rows(
     detector,
     embedder,
     require_single_face: bool,
-    cache: dict[str, Any],
+    cache: dict[str, CachedFaceEmbedding | None],
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     valid_rows: list[dict[str, Any]] = []
     failed_rows: list[dict[str, Any]] = []
@@ -107,12 +177,13 @@ def _extract_face_rows(
         path_str = str(path)
         if path_str not in cache:
             try:
-                cache[path_str] = extract_face_embedding(
+                extracted_face = extract_face_embedding(
                     path_str,
                     detector=detector,
                     embedder=embedder,
                     require_single_face=require_single_face,
                 )
+                cache[path_str] = None if extracted_face is None else _cache_face_embedding(extracted_face)
             except ValueError as exc:
                 failed_rows.append(
                     {
@@ -131,7 +202,7 @@ def _extract_face_rows(
             valid_rows.append(
                 {
                     **row,
-                    f"{role}_embedding": face.embedding,
+                    _embedding_column_name(role): face.embedding,
                     f"{role}_face_count": face.face_count,
                     f"{role}_confidence": face.confidence,
                 }
@@ -341,6 +412,7 @@ def _score_method_rows(
     embedder,
     require_single_face: bool,
     face_cache: dict[str, Any],
+    cache_path: Path | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     valid_recon_df, failed_rows_df = _extract_face_rows(
         rows,
@@ -351,6 +423,8 @@ def _score_method_rows(
         require_single_face=require_single_face,
         cache=face_cache,
     )
+    if cache_path is not None:
+        _save_face_cache(cache_path, face_cache)
 
     if valid_recon_df.empty:
         return valid_recon_df, failed_rows_df, pd.DataFrame(), pd.DataFrame()
@@ -466,6 +540,10 @@ def run_score_pipeline(
     score_dir = Path(output_dir) if output_dir is not None else input_run_dir / "biometric_eval"
     score_dir.mkdir(parents=True, exist_ok=True)
     LOGGER.info("[score-1a2b] writing outputs to %s", score_dir)
+    face_cache_path = score_dir / "face_embedding_cache.pkl"
+    face_cache = _load_face_cache(face_cache_path)
+    if face_cache:
+        LOGGER.info("[score-1a2b] loaded %d cached face embedding(s) from %s", len(face_cache), face_cache_path)
 
     detector_backend = cfg.get("score_detector_backend", "insightface")
     embedder_backend = cfg.get("score_embedder_backend", "insightface")
@@ -479,7 +557,6 @@ def run_score_pipeline(
     require_single_face = bool(cfg.get("score_require_single_face", cfg.get("require_single_face", False)))
     LOGGER.info("[score-1a2b] require_single_face=%s", require_single_face)
 
-    face_cache: dict[str, Any] = {}
     source_rows = [
         {
             "source_row_index": int(source_row_index),
@@ -498,6 +575,7 @@ def run_score_pipeline(
         require_single_face=require_single_face,
         cache=face_cache,
     )
+    _save_face_cache(face_cache_path, face_cache)
     LOGGER.info(
         "[score-1a2b] source gallery produced %d valid row(s) and %d failed row(s)",
         len(source_valid_df),
@@ -542,6 +620,7 @@ def run_score_pipeline(
             embedder=embedder,
             require_single_face=require_single_face,
             face_cache=face_cache,
+            cache_path=face_cache_path,
         )
         LOGGER.info(
             "[score-1a2b] method=%s produced %d valid reconstruction row(s), %d failed row(s), %d type-I pair(s), %d type-II pair(s)",

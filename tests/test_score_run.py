@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+import numpy as np
 import pandas as pd
 
 from emb2face import score_run
@@ -49,6 +50,41 @@ class ScoreRunTests(unittest.TestCase):
         self.assertIn("Expected exactly one face but detected 2", str(failed_df.iloc[0]["error"]))
 
         self.assertIsInstance(valid_df, pd.DataFrame)
+
+    def test_build_type_i_pairs_uses_recon_embedding_column(self):
+        source_valid_df = pd.DataFrame(
+            [
+                {
+                    "source_row_index": 0,
+                    "identity": "alice",
+                    "source_path": "/tmp/source-ok.jpg",
+                    "source_embedding": np.asarray([1.0, 0.0, 0.0], dtype=np.float32),
+                }
+            ]
+        )
+        valid_recon_df = pd.DataFrame(
+            [
+                {
+                    "source_row_index": 0,
+                    "recon_row_index": 0,
+                    "identity": "alice",
+                    "recon_path": "/tmp/recon-ok.jpg",
+                    "recon_embedding": np.asarray([1.0, 0.0, 0.0], dtype=np.float32),
+                }
+            ]
+        )
+
+        source_pos_by_row_index, _ = score_run._build_source_lookup(source_valid_df)
+        pair_df = score_run._build_type_i_pairs(
+            valid_recon_df,
+            source_valid_df,
+            source_pos_by_row_index,
+            impostors_by_source_row={0: []},
+        )
+
+        self.assertEqual(len(pair_df), 1)
+        self.assertEqual(pair_df.iloc[0]["comparison_type"], "type_i_genuine")
+        self.assertAlmostEqual(float(pair_df.iloc[0]["score"]), 1.0, places=6)
 
 
 if __name__ == "__main__":
