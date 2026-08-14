@@ -52,7 +52,7 @@ class ScoreRunTests(unittest.TestCase):
         self.assertIn("Expected exactly one face but detected 2", str(failed_df.iloc[0]["error"]))
 
         self.assertIsInstance(valid_df, pd.DataFrame)
-        self.assertIsNone(cache["/tmp/source-multi.jpg"])
+        self.assertNotIn("/tmp/source-multi.jpg", cache)
 
     def test_build_type_i_pairs_uses_recon_embedding_column(self):
         source_valid_df = pd.DataFrame(
@@ -87,7 +87,82 @@ class ScoreRunTests(unittest.TestCase):
 
         self.assertEqual(len(pair_df), 1)
         self.assertEqual(pair_df.iloc[0]["comparison_type"], "type_i_genuine")
+        self.assertEqual(pair_df.iloc[0]["reconstruction_id"], "alice:0:0")
         self.assertAlmostEqual(float(pair_df.iloc[0]["score"]), 1.0, places=6)
+
+    def test_build_type_i_summary_uses_genuine_only_exact_scores(self):
+        pair_df = pd.DataFrame(
+            [
+                {"label": 1, "score": 0.9},
+                {"label": 0, "score": 0.1},
+                {"label": 0, "score": 0.2},
+            ]
+        )
+
+        summary = score_run._build_type_i_summary(
+            "method-a",
+            pair_df,
+            cfg={"score_require_single_face": True},
+            detector_backend="retinaface",
+            embedder_backend="insightface",
+            num_valid_rows=1,
+            num_failed_rows=0,
+            num_source_missing_rows=0,
+        )
+
+        self.assertEqual(summary["mean_exact_score"], 0.9)
+        self.assertEqual(summary["min_exact_score"], 0.9)
+        self.assertEqual(summary["max_exact_score"], 0.9)
+        self.assertEqual(summary["num_genuine"], 1)
+        self.assertEqual(summary["num_impostor"], 2)
+        self.assertIn("eer", summary)
+        self.assertIn("far_at_eer", summary)
+        self.assertIn("frr_at_eer", summary)
+
+    def test_build_type_ii_pairs_allows_missing_exact_source(self):
+        source_valid_df = pd.DataFrame(
+            [
+                {
+                    "source_row_index": 1,
+                    "identity": "alice",
+                    "source_path": "/tmp/source-peer.jpg",
+                    "source_embedding": np.asarray([1.0, 0.0, 0.0], dtype=np.float32),
+                },
+                {
+                    "source_row_index": 2,
+                    "identity": "bob",
+                    "source_path": "/tmp/source-bob.jpg",
+                    "source_embedding": np.asarray([0.0, 1.0, 0.0], dtype=np.float32),
+                },
+            ]
+        )
+        valid_recon_df = pd.DataFrame(
+            [
+                {
+                    "source_row_index": 0,
+                    "recon_row_index": 0,
+                    "recon_path_index": 0,
+                    "reconstruction_id": "method-a:0:0",
+                    "identity": "alice",
+                    "recon_path": "/tmp/recon-ok.jpg",
+                    "recon_embedding": np.asarray([1.0, 0.0, 0.0], dtype=np.float32),
+                }
+            ]
+        )
+
+        source_pos_by_row_index, same_identity_rows = score_run._build_source_lookup(source_valid_df)
+        pair_df = score_run._build_type_ii_pairs(
+            valid_recon_df,
+            source_valid_df,
+            source_pos_by_row_index,
+            same_identity_rows,
+            impostors_by_source_row={0: []},
+        )
+
+        self.assertEqual(len(pair_df), 1)
+        self.assertEqual(pair_df.iloc[0]["comparison_type"], "type_ii_genuine")
+        self.assertEqual(pair_df.iloc[0]["source_row_index"], 1)
+        self.assertEqual(pair_df.iloc[0]["reconstruction_id"], "method-a:0:0")
 
     def test_extract_face_rows_periodically_saves_cache(self):
         rows = [
