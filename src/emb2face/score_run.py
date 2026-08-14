@@ -245,7 +245,10 @@ def _extract_face_rows(
                 )
                 if extracted_face is not None:
                     cache[path_str] = _cache_face_embedding(extracted_face)
+                else:
+                    cache[path_str] = None
             except ValueError as exc:
+                cache[path_str] = None
                 failed_rows.append(
                     {
                         **row,
@@ -255,7 +258,7 @@ def _extract_face_rows(
                     }
                 )
                 continue
-        face = cache[path_str]
+        face = cache.get(path_str)
 
         if face is None:
             failed_rows.append({**row, "role": role, "reason": f"{role}_face_extraction_failed"})

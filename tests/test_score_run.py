@@ -54,6 +54,37 @@ class ScoreRunTests(unittest.TestCase):
         self.assertIsInstance(valid_df, pd.DataFrame)
         self.assertNotIn("/tmp/source-multi.jpg", cache)
 
+    def test_extract_face_rows_treats_none_extraction_as_failed_row(self):
+        rows = [
+            {"source_path": "/tmp/source-none.jpg", "identity": "alice"},
+        ]
+        cache: dict[str, object] = {}
+
+        original_extract = score_run.extract_face_embedding
+
+        def fake_extract_face_embedding(path_str, *, detector, embedder, require_single_face):
+            return None
+
+        try:
+            score_run.extract_face_embedding = fake_extract_face_embedding
+            valid_df, failed_df = score_run._extract_face_rows(
+                rows,
+                path_key="source_path",
+                role="source",
+                detector=object(),
+                embedder=object(),
+                require_single_face=True,
+                cache=cache,
+            )
+        finally:
+            score_run.extract_face_embedding = original_extract
+
+        self.assertTrue(valid_df.empty)
+        self.assertEqual(len(failed_df), 1)
+        self.assertEqual(failed_df.iloc[0]["reason"], "source_face_extraction_failed")
+        self.assertIn("/tmp/source-none.jpg", cache)
+        self.assertIsNone(cache["/tmp/source-none.jpg"])
+
     def test_build_type_i_pairs_uses_recon_embedding_column(self):
         source_valid_df = pd.DataFrame(
             [
