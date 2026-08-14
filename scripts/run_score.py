@@ -35,7 +35,10 @@ def main():
         selected_methods=selected_methods,
     )
     print("Results written to:", result["output_dir"])
-    print(result["summary"])
+    print("Type I summary:")
+    print(result["type_i_summary"])
+    print("Type II summary:")
+    print(result["type_ii_summary"])
 
 
 if __name__ == "__main__":

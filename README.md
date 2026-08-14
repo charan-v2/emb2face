@@ -130,14 +130,13 @@ If you switch the embedder to `uniface`, install UniFace first with `pip install
 
 The scoring step writes:
 
-- `verification_eval.csv`: Type I genuine/impostor summary per reconstruction method, including FAR, FRR, FMR, FNMR, EER, and threshold
 - `summary.csv`: combined Type I and Type II summary table
-- `verification_scores.csv`: flattened Type I genuine/impostor score table
+- `typeI_summary.csv`: Type I genuine/impostor summary per reconstruction method, including FAR, FRR, FMR, FNMR, EER, and threshold
+- `typeI_scores.csv`: flattened Type I genuine/impostor score table
 - `typeII_summary.csv`: Type II summary per method
 - `typeII_scores.csv`: flattened Type II genuine/impostor score table
-- `det_curve.csv`: Type I DET curve points
-- `det_curve.png`: quick visual check of the Type I DET curve
-- `typeII_det_curve.csv`: Type II DET curve points
+- `det_curve.csv`: combined Type I and Type II DET curve points, labeled by `comparison_type`
+- `typeI_det_curve.png`: quick visual check of the Type I DET curve
 - `typeII_det_curve.png`: quick visual check of the Type II DET curve
 
 Type I uses the exact source image for each reconstruction plus a capped impostor sample. Type II compares each reconstruction against the other images of the same identity, excluding the source image, plus the same capped impostor sample.
@@ -270,14 +269,13 @@ The pipeline writes artifacts under `output_root`, grouped by run mode:
   - `inference_report.csv`: per-image reconstruction paths and metadata
   - `summary.csv`: aggregate sampling / generation stats for the sampled set
 - `inference_<runmode>/<run_id>/biometric_eval/`: biometric scores for a previous inference run
-  - `verification_eval.csv`: Type I genuine/impostor summary, including FAR, FRR, FMR, FNMR, EER, and threshold
   - `summary.csv`: combined Type I and Type II summary table
-  - `verification_scores.csv`: Type I pairwise score table
+  - `typeI_summary.csv`: Type I genuine/impostor summary, including FAR, FRR, FMR, FNMR, EER, and threshold
+  - `typeI_scores.csv`: Type I pairwise score table
   - `typeII_summary.csv`: Type II summary
   - `typeII_scores.csv`: Type II pairwise score table
-  - `det_curve.csv`: Type I DET curve data
-  - `det_curve.png`: Type I DET curve plot
-  - `typeII_det_curve.csv`: Type II DET curve data
+  - `det_curve.csv`: combined Type I and Type II DET curve data, labeled by `comparison_type`
+  - `typeI_det_curve.png`: Type I DET curve plot
   - `typeII_det_curve.png`: Type II DET curve plot
 
 ## Notes

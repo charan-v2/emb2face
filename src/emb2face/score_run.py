@@ -550,7 +550,7 @@ def _score_to_summary(
     }
 
 
-def _save_det_plot(det_curve_df: pd.DataFrame, output_path: Path):
+def _save_det_plot(det_curve_df: pd.DataFrame, output_path: Path, title: str = "DET Curve"):
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(7, 5))
@@ -558,7 +558,7 @@ def _save_det_plot(det_curve_df: pd.DataFrame, output_path: Path):
         ax.plot(sub["far"], sub["fnmr"], label=method)
     ax.set_xlabel("FAR")
     ax.set_ylabel("FNMR")
-    ax.set_title("DET Curve")
+    ax.set_title(title)
     ax.grid(True, alpha=0.3)
     ax.legend()
     plt.tight_layout()
@@ -731,6 +731,7 @@ def run_score_pipeline(
             det = det_curve_points(type_i_df["label"].to_numpy(), type_i_df["score"].to_numpy())
             det_df = pd.DataFrame(det)
             det_df["method"] = method
+            det_df["comparison_type"] = "type_i"
             det_frames.append(det_df)
             type_i_summary_rows.append(
                 _build_type_i_summary(
@@ -780,6 +781,7 @@ def run_score_pipeline(
             type_ii_det = det_curve_points(type_ii_df["label"].to_numpy(), type_ii_df["score"].to_numpy())
             type_ii_det_df = pd.DataFrame(type_ii_det)
             type_ii_det_df["method"] = method
+            type_ii_det_df["comparison_type"] = "type_ii"
             type_ii_det_frames.append(type_ii_det_df)
             type_ii_summary_rows.append(
                 {
@@ -822,17 +824,22 @@ def run_score_pipeline(
 
     type_i_summary_df = pd.DataFrame(type_i_summary_rows)
     type_ii_summary_df = pd.DataFrame(type_ii_summary_rows)
-    verification_eval_df = type_i_summary_df
     summary_df = pd.concat([type_i_summary_df, type_ii_summary_df], ignore_index=True)
     LOGGER.info("[score-1a2b] concatenating outputs")
+    LOGGER.info(
+        "[score-1a2b] summary rows: type_i=%d type_ii=%d combined=%d",
+        len(type_i_summary_df),
+        len(type_ii_summary_df),
+        len(summary_df),
+    )
     type_i_scores_df = pd.concat(type_i_frames, ignore_index=True) if type_i_frames else pd.DataFrame()
     type_ii_scores_df = pd.concat(type_ii_frames, ignore_index=True) if type_ii_frames else pd.DataFrame()
-    det_curve_df = pd.concat(det_frames, ignore_index=True) if det_frames else pd.DataFrame()
+    type_i_det_curve_df = pd.concat(det_frames, ignore_index=True) if det_frames else pd.DataFrame()
     type_ii_det_curve_df = pd.concat(type_ii_det_frames, ignore_index=True) if type_ii_det_frames else pd.DataFrame()
+    det_curve_df = pd.concat([df for df in [type_i_det_curve_df, type_ii_det_curve_df] if not df.empty], ignore_index=True) if (not type_i_det_curve_df.empty or not type_ii_det_curve_df.empty) else pd.DataFrame()
     failed_df = pd.concat(failed_frames, ignore_index=True) if failed_frames else pd.DataFrame()
 
-    LOGGER.info("[score-1a2b] writing verification_eval.csv and summary.csv")
-    verification_eval_df.to_csv(score_dir / "verification_eval.csv", index=False)
+    LOGGER.info("[score-1a2b] writing summary.csv")
     summary_df.to_csv(score_dir / "summary.csv", index=False)
     if not type_i_summary_df.empty:
         LOGGER.info("[score-1a2b] writing typeI_summary.csv with %d row(s)", len(type_i_summary_df))
@@ -841,20 +848,20 @@ def run_score_pipeline(
         LOGGER.info("[score-1a2b] writing typeII_summary.csv with %d row(s)", len(type_ii_summary_df))
         type_ii_summary_df.to_csv(score_dir / "typeII_summary.csv", index=False)
     if not type_i_scores_df.empty:
-        LOGGER.info("[score-1a2b] writing verification_scores.csv and typeI_scores.csv with %d row(s)", len(type_i_scores_df))
-        type_i_scores_df.to_csv(score_dir / "verification_scores.csv", index=False)
+        LOGGER.info("[score-1a2b] writing typeI_scores.csv with %d row(s)", len(type_i_scores_df))
         type_i_scores_df.to_csv(score_dir / "typeI_scores.csv", index=False)
     if not type_ii_scores_df.empty:
         LOGGER.info("[score-1a2b] writing typeII_scores.csv with %d row(s)", len(type_ii_scores_df))
         type_ii_scores_df.to_csv(score_dir / "typeII_scores.csv", index=False)
     if not det_curve_df.empty:
-        LOGGER.info("[score-1a2b] writing det_curve.csv and det_curve.png with %d row(s)", len(det_curve_df))
+        LOGGER.info("[score-1a2b] writing det_curve.csv with %d row(s)", len(det_curve_df))
         det_curve_df.to_csv(score_dir / "det_curve.csv", index=False)
-        _save_det_plot(det_curve_df, score_dir / "det_curve.png")
+    if not type_i_det_curve_df.empty:
+        LOGGER.info("[score-1a2b] writing typeI_det_curve.png with %d row(s)", len(type_i_det_curve_df))
+        _save_det_plot(type_i_det_curve_df, score_dir / "typeI_det_curve.png", title="Type I DET Curve")
     if not type_ii_det_curve_df.empty:
-        LOGGER.info("[score-1a2b] writing typeII_det_curve.csv and typeII_det_curve.png with %d row(s)", len(type_ii_det_curve_df))
-        type_ii_det_curve_df.to_csv(score_dir / "typeII_det_curve.csv", index=False)
-        _save_det_plot(type_ii_det_curve_df, score_dir / "typeII_det_curve.png")
+        LOGGER.info("[score-1a2b] writing typeII_det_curve.png with %d row(s)", len(type_ii_det_curve_df))
+        _save_det_plot(type_ii_det_curve_df, score_dir / "typeII_det_curve.png", title="Type II DET Curve")
     if not failed_df.empty:
         LOGGER.info("[score-1a2b] writing failed_rows.csv with %d row(s)", len(failed_df))
         failed_df.to_csv(score_dir / "failed_rows.csv", index=False)
@@ -863,10 +870,12 @@ def run_score_pipeline(
     return {
         "output_dir": score_dir,
         "summary": summary_df,
-        "scores": type_i_scores_df,
+        "type_i_summary": type_i_summary_df,
+        "type_ii_summary": type_ii_summary_df,
         "type_i_scores": type_i_scores_df,
         "type_ii_scores": type_ii_scores_df,
         "det_curve": det_curve_df,
+        "type_i_det_curve": type_i_det_curve_df,
         "type_ii_det_curve": type_ii_det_curve_df,
         "failed": failed_df,
     }

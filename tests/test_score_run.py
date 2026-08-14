@@ -164,6 +164,18 @@ class ScoreRunTests(unittest.TestCase):
         self.assertEqual(pair_df.iloc[0]["source_row_index"], 1)
         self.assertEqual(pair_df.iloc[0]["reconstruction_id"], "method-a:0:0")
 
+    def test_det_curve_rows_can_be_labeled_by_comparison_type(self):
+        type_i = pd.DataFrame(score_run.det_curve_points([1, 0], [0.9, 0.1]))
+        type_i["method"] = "method-a"
+        type_i["comparison_type"] = "type_i"
+        type_ii = pd.DataFrame(score_run.det_curve_points([1, 0], [0.8, 0.2]))
+        type_ii["method"] = "method-a"
+        type_ii["comparison_type"] = "type_ii"
+        combined = pd.concat([type_i, type_ii], ignore_index=True)
+
+        self.assertIn("comparison_type", combined.columns)
+        self.assertEqual(set(combined["comparison_type"].unique()), {"type_i", "type_ii"})
+
     def test_extract_face_rows_periodically_saves_cache(self):
         rows = [
             {"source_path": "/tmp/source-1.jpg", "identity": "alice"},
